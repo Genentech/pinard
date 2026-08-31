@@ -50,7 +50,19 @@ RUN pip install --no-cache-dir -r services/memory/requirements.txt
 
 # ── Stage 4: runtime ─────────────────────────────
 FROM ${PYTHON}
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
+# ROCHE_CA_DEB_URL: when set, download and install the corporate internal CA .deb
+# so the pod can reach intranet TLS (Rosetta, cloud Engram). Set in internal CI
+# builds only; public/OSS builds leave this empty and rely on the Helm-mounted
+# CA bundle (memory.caBundle) instead. No intranet URL appears in this file.
+ARG ROCHE_CA_DEB_URL=""
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git openssh-client wget \
+    && if [ -n "$ROCHE_CA_DEB_URL" ]; then \
+         wget -q "$ROCHE_CA_DEB_URL" -O roche-ca-certificates.deb \
+         && dpkg -i roche-ca-certificates.deb \
+         && rm -f roche-ca-certificates.deb \
+         && update-ca-certificates; \
+    fi \
+    && apt-get purge -y wget && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build   /out/webterm-gateway        /usr/local/bin/webterm-gateway
 COPY --from=site    /out/site                   /srv/site
@@ -58,6 +70,11 @@ COPY --from=pydeps  /usr/local/lib/python3.11/site-packages \
                     /usr/local/lib/python3.11/site-packages
 COPY services/ /app/services/
 COPY packages/pinard-core/ /app/packages/pinard-core/
+# Entrypoint script: if EXTRA_CA_CERTS points to a mounted CA bundle, append it
+# to the system trust store before starting the main process.
+RUN printf '#!/bin/sh\nset -e\nif [ -n "$EXTRA_CA_CERTS" ] && [ -f "$EXTRA_CA_CERTS" ]; then\n    cat "$EXTRA_CA_CERTS" >> /etc/ssl/certs/ca-certificates.crt\nfi\nexec "$@"\n' > /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
 WORKDIR /app
 EXPOSE 80 8080
-ENTRYPOINT ["webterm-gateway"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh", "webterm-gateway"]
+CMD []

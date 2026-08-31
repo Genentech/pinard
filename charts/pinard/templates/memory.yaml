@@ -10,6 +10,12 @@
 {{- $hasNatsCreds := and $c.vault.enabled $c.vault.natsPasswordKey }}
 {{- $hasEngramRoDsn := and $c.vault.enabled $c.vault.engramRoDsnKey }}
 {{- $hasVignes := and $c.vignes $c.vignes.data }}
+{{- $hasCaBundle := and $c.caBundle $c.caBundle.enabled }}
+{{- $caBundleMountPath := "/etc/ssl/extra-ca" }}
+{{- if and $hasCaBundle $c.caBundle.mountPath }}{{- $caBundleMountPath = $c.caBundle.mountPath }}{{- end }}
+{{- $caBundleKey := "ca-bundle.crt" }}
+{{- if and $hasCaBundle $c.caBundle.key }}{{- $caBundleKey = $c.caBundle.key }}{{- end }}
+{{- $caBundleCertFile := printf "%s/%s" $caBundleMountPath $caBundleKey }}
 {{- $sshKey := "" }}
 {{- if and $c.vault.enabled $c.vault.sshKey }}
 {{- $sshKey = $c.vault.sshKey }}
@@ -102,6 +108,10 @@ spec:
     - secretKey: {{ $sshKey }}
       remoteRef: { key: {{ $v.path }}, property: {{ $sshKey }} }
     {{- end }}
+    {{- if $v.caBundleVaultKey }}
+    - secretKey: {{ $v.caBundleProperty | default "ca-bundle.crt" }}
+      remoteRef: { key: {{ $v.caBundleVaultKey }}, property: {{ $v.caBundleProperty | default "ca-bundle.crt" }} }
+    {{- end }}
 {{- end }}
 ---
 apiVersion: apps/v1
@@ -180,6 +190,11 @@ spec:
               readOnly: true
             - name: repos
               mountPath: {{ $cloneDir | quote }}
+            {{- if $hasCaBundle }}
+            - name: ca-bundle
+              mountPath: {{ $caBundleMountPath | quote }}
+              readOnly: true
+            {{- end }}
       {{- end }}
       containers:
         - name: memory
@@ -224,6 +239,14 @@ spec:
               value: {{ $c.config.sslCertFile | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
             - name: REQUESTS_CA_BUNDLE
               value: {{ $c.config.requestsCaBundle | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+            {{- if $hasCaBundle }}
+            # EXTRA_CA_CERTS: the entrypoint appends this file to the system trust store before
+            # exec, so both public and internal CA roots are trusted. SSL_CERT_FILE / REQUESTS_CA_BUNDLE
+            # stay at the system bundle path — overriding them to a corporate-only file would break
+            # public endpoints (Gemini/Vertex, PyPI, etc.).
+            - name: EXTRA_CA_CERTS
+              value: {{ $caBundleCertFile | quote }}
+            {{- end }}
             {{- if $hasEngramRoDsn }}
             - name: ENGRAM_PG_DSN
               valueFrom:
@@ -289,6 +312,11 @@ spec:
             - name: repos
               mountPath: {{ $cloneDir | quote }}
             {{- end }}
+            {{- if $hasCaBundle }}
+            - name: ca-bundle
+              mountPath: {{ $caBundleMountPath | quote }}
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml $c.resources | nindent 12 }}
       volumes:
@@ -320,6 +348,28 @@ spec:
         {{- if $hasSsh }}
         - name: repos
           emptyDir: {}
+        {{- end }}
+        {{- if $hasCaBundle }}
+        - name: ca-bundle
+          {{- if and $c.vault.enabled $c.vault.caBundleVaultKey }}
+          secret:
+            secretName: {{ $vaultSecretName }}
+            items:
+              - key: {{ $c.vault.caBundleProperty | default "ca-bundle.crt" }}
+                path: {{ $c.vault.caBundleProperty | default "ca-bundle.crt" }}
+          {{- else if $c.caBundle.secretName }}
+          secret:
+            secretName: {{ $c.caBundle.secretName }}
+            items:
+              - key: {{ $caBundleKey }}
+                path: {{ $caBundleKey }}
+          {{- else }}
+          configMap:
+            name: {{ $c.caBundle.configMapName }}
+            items:
+              - key: {{ $caBundleKey }}
+                path: {{ $caBundleKey }}
+          {{- end }}
         {{- end }}
       {{- with $c.nodeSelector }}
       nodeSelector:

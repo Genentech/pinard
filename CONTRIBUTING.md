@@ -60,6 +60,13 @@ integration builds only with `-tags capsule`).
 CI runs a secret scan (gitleaks) on every PR. Never commit credentials, tokens,
 or private hostnames; PRs that introduce a detected secret will fail.
 
+CI also runs an **OSS export guard** (`oss-export-guard` job) on every branch.
+It exports the shippable file set and scans it for internal identifiers
+(internal hostnames, AWS account IDs, internal usernames, etc.). Files that are
+stripped from the export (internal chart values, Dockerfiles, `dist/`, etc.) do
+not trigger the guard. Any match in a shippable file fails the pipeline — fix it
+before merging.
+
 ## Submitting changes
 
 1. Fork and create a topic branch (`feat/…`, `fix/…`, `docs/…`, `chore/…`).

@@ -259,9 +259,23 @@ memory:
     # Parent dir of vignoble clones (e.g. /data/repos/vignobles). Required in production;
     # empty here so local dev can opt out. Set explicitly in custom-<env>.yaml.
     vignobleBaseDir: ""
-    # Corporate CA bundle — baked into the base image; httpx and requests honour these env vars
+    # Corporate CA bundle — baked into the base image; httpx and requests honour these env vars.
+    # When memory.caBundle.enabled, these are overridden to point at the mounted bundle.
     sslCertFile: "/etc/ssl/certs/ca-certificates.crt"
     requestsCaBundle: "/etc/ssl/certs/ca-certificates.crt"
+  # caBundle: mount an extra CA bundle (e.g. corporate internal CA) at runtime.
+  # The entrypoint appends the mounted file to /etc/ssl/certs/ca-certificates.crt
+  # before exec (via EXTRA_CA_CERTS). SSL_CERT_FILE / REQUESTS_CA_BUNDLE are NOT
+  # overridden — they stay at the system bundle path so both public and internal
+  # CAs are trusted. IMPORTANT: the mounted file may be a CA-only bundle (just the
+  # extra corporate roots); the entrypoint merges it with the existing system store.
+  # Source: either a Secret (secretName) or a ConfigMap (configMapName); exactly one.
+  caBundle:
+    enabled: false
+    secretName: ""         # k8s Secret containing the CA bundle
+    configMapName: ""      # k8s ConfigMap containing the CA bundle (alternative)
+    key: ca-bundle.crt    # key inside the Secret/ConfigMap
+    mountPath: /etc/ssl/extra-ca
   vault:
     enabled: false
     secretStore: vault-cluster-store
@@ -272,6 +286,10 @@ memory:
     natsPasswordKey: ""  # e.g. nats_lelongs_passwd; set to add creds to NATS_URL
     engramRoDsnKey: ""   # e.g. engram_ro_dsn; set to inject ENGRAM_PG_DSN from Vault
     sshKey: ""           # e.g. ssh_github_com; overrides memory.ssh.vault.sshKey when set
+    caBundleVaultKey: "" # e.g. huge-v2/shared/roche-ca; when set, syncs the CA bundle from
+                          # Vault into the vault secret (key = caBundleProperty). Use with
+                          # caBundle.enabled=true pointing at the vault secret.
+    caBundleProperty: ca-bundle.crt  # Vault property name for the CA bundle
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { cpu: "1", memory: 512Mi }

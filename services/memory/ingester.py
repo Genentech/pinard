@@ -1964,6 +1964,118 @@ def _rechunk_all_scopes(registry: OntologyRegistry) -> None:
             logger.error("--rechunk: SurrealDB error for scope=%s: %s", scope, exc)
 
 
+def _reembed_all_scopes(registry: OntologyRegistry) -> None:
+    """Re-embed entity / wiki_doc / wiki_chunk rows that have embedding = NONE.
+
+    Targets rows where the embedding column is NULL (i.e. embedding failed
+    during the Rosetta SSL outage). Skips rows with manual_edit = true.
+    Idempotent: rows that already have an embedding are left untouched.
+
+    Mirrors the scope set used by _recurate_all_scopes / _rechunk_all_scopes.
+    """
+    from .rollup import (
+        _load_all_vignoble_memberships,
+        _get_vignobles_base_dir,
+        _vignoble_db,
+        _parcelle_db,
+    )
+    from .wiki.curator import GLOBAL_WIKI_GROUP
+
+    scopes: set[str] = set()
+    scopes.update(_resolve_group_ids(registry))
+
+    vignobles_base = _get_vignobles_base_dir()
+    if vignobles_base:
+        membership = _load_all_vignoble_memberships(vignobles_base)
+        for vname in membership:
+            scopes.add(_vignoble_db(vname))
+
+    scopes.add(GLOBAL_WIKI_GROUP)
+
+    parcelle = os.environ.get("PINARD_PARCELLE", "").strip()
+    if parcelle:
+        scopes.add(_parcelle_db(parcelle))
+
+    logger.info("--reembed: processing %d scope(s)", len(scopes))
+
+    for scope in sorted(scopes):
+        try:
+            with SurrealClient(group_id=scope) as surreal:
+                # ── entity rows missing embeddings ────────────────────────────
+                rows = surreal.query(
+                    "SELECT id, name, description FROM entity "
+                    "WHERE embedding IS NONE AND (manual_edit IS NONE OR manual_edit = false) "
+                    "LIMIT 10000"
+                )
+                entities = rows[0] if rows and isinstance(rows[0], list) else []
+                logger.info("--reembed: scope=%s entity rows to fix: %d", scope, len(entities))
+                ok = err = 0
+                for row in entities:
+                    name = row.get("name", "")
+                    description = row.get("description", "")
+                    embed_text = f"{name}: {description}" if description else name
+                    try:
+                        vector = embed(embed_text)
+                        surreal.query(
+                            "UPDATE type::record($id) SET embedding = $embedding, updated_at = time::now()",
+                            {"id": row["id"], "embedding": vector},
+                        )
+                        ok += 1
+                    except EmbeddingError as exc:
+                        logger.warning("--reembed: entity %s embed failed: %s", row.get("id"), exc)
+                        err += 1
+                logger.info("--reembed: scope=%s entity done ok=%d err=%d", scope, ok, err)
+
+                # ── wiki_doc rows missing embeddings ──────────────────────────
+                rows = surreal.query(
+                    "SELECT id, title, body FROM wiki_doc "
+                    "WHERE embedding IS NONE AND body != '' LIMIT 10000"
+                )
+                docs = rows[0] if rows and isinstance(rows[0], list) else []
+                logger.info("--reembed: scope=%s wiki_doc rows to fix: %d", scope, len(docs))
+                ok = err = 0
+                for row in docs:
+                    title = row.get("title", "")
+                    body = row.get("body", "")
+                    embed_text = f"{title}\n{body[:2000]}" if title else body[:2000]
+                    try:
+                        vector = embed(embed_text)
+                        surreal.query(
+                            "UPDATE type::record($id) SET embedding = $embedding, updated_at = time::now()",
+                            {"id": row["id"], "embedding": vector},
+                        )
+                        ok += 1
+                    except EmbeddingError as exc:
+                        logger.warning("--reembed: wiki_doc %s embed failed: %s", row.get("id"), exc)
+                        err += 1
+                logger.info("--reembed: scope=%s wiki_doc done ok=%d err=%d", scope, ok, err)
+
+                # ── wiki_chunk rows missing embeddings ────────────────────────
+                rows = surreal.query(
+                    "SELECT id, text FROM wiki_chunk "
+                    "WHERE embedding IS NONE AND text != '' LIMIT 50000"
+                )
+                chunks = rows[0] if rows and isinstance(rows[0], list) else []
+                logger.info("--reembed: scope=%s wiki_chunk rows to fix: %d", scope, len(chunks))
+                ok = err = 0
+                for row in chunks:
+                    text = row.get("text", "")
+                    try:
+                        vector = embed(text)
+                        surreal.query(
+                            "UPDATE type::record($id) SET embedding = $embedding",
+                            {"id": row["id"], "embedding": vector},
+                        )
+                        ok += 1
+                    except EmbeddingError as exc:
+                        logger.warning("--reembed: wiki_chunk %s embed failed: %s", row.get("id"), exc)
+                        err += 1
+                logger.info("--reembed: scope=%s wiki_chunk done ok=%d err=%d", scope, ok, err)
+
+        except SurrealError as exc:
+            logger.error("--reembed: SurrealDB error for scope=%s: %s", scope, exc)
+
+
 def main() -> None:
     """CLI entry point.
 
@@ -1998,6 +2110,15 @@ def main() -> None:
             "then exit. Idempotent; use after a chunking strategy or embedding model change."
         ),
     )
+    parser.add_argument(
+        "--reembed",
+        action="store_true",
+        help=(
+            "Re-embed entity/wiki_doc/wiki_chunk rows with embedding=NONE across all scopes "
+            "then exit. Idempotent; use to backfill entities ingested during an embedding "
+            "outage (e.g. SSL cert failure)."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -2016,6 +2137,11 @@ def main() -> None:
     if args.rechunk:
         registry = OntologyRegistry()
         _rechunk_all_scopes(registry)
+        return
+
+    if args.reembed:
+        registry = OntologyRegistry()
+        _reembed_all_scopes(registry)
         return
 
     asyncio.run(run())
