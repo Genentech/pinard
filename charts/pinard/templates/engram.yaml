@@ -1,0 +1,289 @@
+{{- if .Values.engram.enabled }}
+{{- $c := .Values.engram }}
+{{- $name := printf "%s-engram" (include "pinard.fullname" .) }}
+{{- $secretName := printf "%s-secrets" $name }}
+{{- $vaultSecretName := printf "%s-auth" $name }}
+{{- $pgName := printf "%s-postgres" $name }}
+# ── engram secrets (cloud token, jwt, embedded-pg password) — preserved ──
+{{- $existing := lookup "v1" "Secret" $.Release.Namespace $secretName }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "engram") | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+stringData:
+  {{- if not $c.vault.enabled }}
+  cloud-token: {{ if $existing }}{{ index $existing.data "cloud-token" | b64dec }}{{ else }}{{ $c.engram.cloudToken | default (randAlphaNum 40) }}{{ end }}
+  jwt-secret: {{ if $existing }}{{ index $existing.data "jwt-secret" | b64dec }}{{ else }}{{ $c.engram.jwtSecret | default (randAlphaNum 48) }}{{ end }}
+  {{- end }}
+  {{- if $c.postgres.enabled }}
+  postgres-password: {{ if $existing }}{{ index $existing.data "postgres-password" | b64dec }}{{ else }}{{ $c.postgres.password | default (randAlphaNum 24) }}{{ end }}
+  {{- end }}
+{{- if $c.vault.enabled }}
+{{- $v := $c.vault }}
+---
+# ── Vault-backed engram cloud token + jwt secret (External Secrets Operator) ──
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: {{ $vaultSecretName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "engram") | nindent 4 }}
+spec:
+  refreshInterval: {{ $v.refreshInterval | quote }}
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: {{ $v.secretStore }}
+  target:
+    name: {{ $vaultSecretName }}
+    creationPolicy: Owner
+  data:
+    - secretKey: cloud-token
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.tokenKey }} }
+    - secretKey: jwt-secret
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.jwtSecretKey }} }
+{{- end }}
+{{- if $c.externalDatabase.vault.enabled }}
+{{- $v := $c.externalDatabase.vault }}
+---
+# ── Vault-backed RDS DSN (External Secrets Operator) ──
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: {{ required "engram.externalDatabase.existingSecret is required when vault.enabled" $c.externalDatabase.existingSecret }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "engram") | nindent 4 }}
+spec:
+  refreshInterval: {{ $v.refreshInterval | quote }}
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: {{ $v.secretStore }}
+  target:
+    name: {{ $c.externalDatabase.existingSecret }}
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      data:
+        {{ $c.externalDatabase.urlKey }}: >-
+          postgres://{{ $v.username }}:{{ printf "{{ .password | urlquery }}" }}@{{ required "engram.externalDatabase.vault.host is required" $v.host }}:{{ $v.port }}/{{ $v.database }}?sslmode={{ $v.sslmode }}
+  data:
+    - secretKey: password
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.passwordKey }} }
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "engram") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "pinard.selectorLabels" (dict "root" $ "component" "engram") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ $c.engram | toYaml | sha256sum }}
+      labels:
+        {{- include "pinard.selectorLabels" (dict "root" $ "component" "engram") | nindent 8 }}
+    spec:
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: engram
+          image: "{{ $c.image.repository }}:{{ $c.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          {{- with $c.engram.command }}
+          command: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if $c.engram.args }}
+          args: {{ toYaml $c.engram.args | nindent 12 }}
+          {{- else }}
+          args: ["cloud", "serve"]
+          {{- end }}
+          env:
+            - name: ENGRAM_CLOUD_HOST
+              value: {{ $c.engram.host | quote }}
+            - name: ENGRAM_PORT
+              value: {{ $c.engram.port | quote }}
+            - name: ENGRAM_CLOUD_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ if $c.vault.enabled }}{{ $vaultSecretName }}{{ else }}{{ $secretName }}{{ end }}, key: cloud-token } }
+            - name: ENGRAM_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ if $c.vault.enabled }}{{ $vaultSecretName }}{{ else }}{{ $secretName }}{{ end }}, key: jwt-secret } }
+            - name: ENGRAM_CLOUD_ALLOWED_PROJECTS
+              value: {{ $c.engram.allowedProjects | default (list "*") | join "," | quote }}
+            {{- if $c.postgres.enabled }}
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: {{ $secretName }}, key: postgres-password } }
+            - name: ENGRAM_DATABASE_URL
+              value: "postgres://{{ $c.postgres.username }}:$(PGPASSWORD)@{{ $pgName }}:5432/{{ $c.postgres.database }}?sslmode=disable"
+            {{- else if $c.externalDatabase.existingSecret }}
+            - name: ENGRAM_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ $c.externalDatabase.existingSecret }}, key: {{ $c.externalDatabase.urlKey }} } }
+            {{- else if $c.externalDatabase.url }}
+            - name: ENGRAM_DATABASE_URL
+              value: {{ $c.externalDatabase.url | quote }}
+            {{- end }}
+            {{- with $c.engram.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $c.engram.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "engram") | nindent 4 }}
+spec:
+  type: {{ $c.service.type }}
+  ports:
+    - name: http
+      port: {{ $c.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "pinard.selectorLabels" (dict "root" $ "component" "engram") | nindent 4 }}
+{{- if $c.ingressRoute.enabled }}
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "engram") | nindent 4 }}
+  {{- with $c.ingressRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  entryPoints:
+    {{- toYaml $c.ingressRoute.entryPoints | nindent 4 }}
+  routes:
+    - match: Host(`{{ required "engram.ingressRoute.host is required" $c.ingressRoute.host }}`)
+      kind: Rule
+      services:
+        - name: {{ $name }}
+          port: {{ $c.service.port }}
+      {{- with $c.ingressRoute.middlewares }}
+      middlewares:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if $c.ingressRoute.tls }}
+  tls:
+    {{- toYaml $c.ingressRoute.tls | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if $c.postgres.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $pgName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "engram-postgres") | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+  selector:
+    {{- include "pinard.selectorLabels" (dict "root" $ "component" "engram-postgres") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $pgName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "engram-postgres") | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ $pgName }}
+  selector:
+    matchLabels:
+      {{- include "pinard.selectorLabels" (dict "root" $ "component" "engram-postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pinard.selectorLabels" (dict "root" $ "component" "engram-postgres") | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ $c.postgres.image.repository }}:{{ $c.postgres.image.tag }}"
+          imagePullPolicy: {{ $c.postgres.image.pullPolicy }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ $c.postgres.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ $c.postgres.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ $secretName }}, key: postgres-password } }
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          livenessProbe:
+            exec: { command: ["pg_isready", "-U", "{{ $c.postgres.username }}", "-d", "{{ $c.postgres.database }}"] }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "{{ $c.postgres.username }}", "-d", "{{ $c.postgres.database }}"] }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml $c.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  {{- if $c.postgres.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $c.postgres.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $c.postgres.persistence.size }}
+  {{- end }}
+{{- end }}
+{{- end }}

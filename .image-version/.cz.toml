@@ -1,0 +1,11 @@
+# Image version lineage — gpapy-asg-ci `.bump-image` cz-bumps this on merges that
+# touch image content and cuts `image-$version` git tags; the built image is pushed
+# to ECR as the plain semver tag (e.g. 0.1.1), which Flux's ImagePolicy (range
+# *.*.*) matches. Separate from the chart `v*` lineage.
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "image-$version"
+version_scheme = "semver"
+version = "0.47.0"
+update_changelog_on_bump = false
+bump_message = "bump image $current_version → $new_version"

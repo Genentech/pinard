@@ -1,0 +1,37 @@
+{{ define "main" }}
+<nav class="nav" id="main-nav">
+  <a class="nav-logo" href="/">Pin<span>ard</span></a>
+  <ul class="nav-links">
+    <li><a href="/#the-estate">The Estate</a></li>
+    <li><a href="/#features">The Cellar</a></li>
+    <li><a href="/docs/" class="active">The Craft</a></li>
+  </ul>
+  <a class="nav-cta" href="https://github.com/Genentech/pinard">GitHub →</a>
+</nav>
+
+<div class="docs-layout">
+  <aside class="docs-sidebar">
+    <h3>Documentation</h3>
+    <ul>
+      {{ $scratch := newScratch }}
+      {{ $scratch.Set "g" "" }}
+      {{ range .Pages.ByWeight }}
+      {{ $grp := .Params.group | default "" }}
+      {{ if ne $grp ($scratch.Get "g") }}
+      <li class="nav-group">{{ $grp }}</li>
+      {{ $scratch.Set "g" $grp }}
+      {{ end }}
+      <li><a href="{{ .RelPermalink }}">{{ .Title }}</a></li>
+      {{ end }}
+    </ul>
+  </aside>
+  <main class="docs-content">
+    <article class="docs-article docs-hero">
+      {{ .Content }}
+    </article>
+  </main>
+</div>
+<footer class="docs-footer-ornament" aria-hidden="true">
+  <img src="/images/docs/docs-footer-tools.png" alt="" loading="lazy" decoding="async">
+</footer>
+{{ end }}

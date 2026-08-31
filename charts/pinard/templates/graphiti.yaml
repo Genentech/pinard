@@ -1,0 +1,130 @@
+{{- if .Values.graphiti.enabled }}
+{{- $c := .Values.graphiti }}
+{{- $name := printf "%s-graphiti" (include "pinard.fullname" .) }}
+{{- $falkordbPvcName := printf "%s-falkordb-data" $name }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "graphiti") | nindent 4 }}
+  annotations:
+    pinard/eval-only: "true"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "pinard.selectorLabels" (dict "root" $ "component" "graphiti") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pinard.selectorLabels" (dict "root" $ "component" "graphiti") | nindent 8 }}
+    spec:
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: falkordb
+          image: "{{ $c.falkordb.image.repository }}:{{ $c.falkordb.image.tag }}"
+          imagePullPolicy: {{ $c.falkordb.image.pullPolicy }}
+          ports:
+            - name: redis
+              containerPort: {{ $c.falkordb.port }}
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml $c.falkordb.resources | nindent 12 }}
+          volumeMounts:
+            - name: falkordb-data
+              mountPath: /data
+        - name: graphiti
+          image: "{{ $c.graphiti.image.repository }}:{{ $c.graphiti.image.tag }}"
+          imagePullPolicy: {{ $c.graphiti.image.pullPolicy }}
+          command: ["python", "-m", "services.memory.graphiti_eval.verify"]
+          env:
+            - name: FALKORDB_URL
+              value: "bolt://localhost:{{ $c.falkordb.port }}"
+            - name: NATS_URL
+              value: {{ $c.graphiti.natsUrl | quote }}
+            - name: MEMORY_EXTRACTION_MODEL
+              value: {{ $c.graphiti.extractionModel | quote }}
+            {{- if $c.graphiti.tokenUrl }}
+            - name: MEMORY_TOKEN_URL
+              value: {{ $c.graphiti.tokenUrl | quote }}
+            {{- end }}
+            {{- with $c.graphiti.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml $c.graphiti.resources | nindent 12 }}
+      volumes:
+        - name: falkordb-data
+          {{- if $c.falkordb.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $falkordbPvcName }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $c.falkordb.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $falkordbPvcName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "graphiti") | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with $c.falkordb.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $c.falkordb.persistence.size }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "graphiti") | nindent 4 }}
+  annotations:
+    pinard/eval-only: "true"
+spec:
+  type: {{ $c.service.type }}
+  ports:
+    - name: falkordb
+      port: {{ $c.service.falkordbPort }}
+      targetPort: redis
+      protocol: TCP
+  selector:
+    {{- include "pinard.selectorLabels" (dict "root" $ "component" "graphiti") | nindent 4 }}
+{{- end }}

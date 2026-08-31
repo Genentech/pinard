@@ -1,0 +1,32 @@
+# Ignore .claude/ except project skills (version-controlled, shared with collaborators)
+.claude/*
+!.claude/skills/
+
+# Real credentials and vignoble config (use *.example.yaml as templates)
+credentials.yaml
+vignes.yaml
+node_modules/
+.pi/
+.exohub/bundles
+/aoc
+/cmd/aoc/aoc
+bin/aoc
+
+# Distribution build artifacts (produced by `make dist` / build-sif.sh)
+dist/stage/
+dist/.tmp/
+dist/*.run
+dist/singularity/pinard-linux-x64.run
+
+# Local git worktrees
+.worktrees/
+
+# engram local store (if the repo is ever a worker cwd / dev mem_* runs here)
+.engram/
+
+# compikled website
+public/
+.hugo_build.lock
+
+__pycache__/
+services/memory/logs/

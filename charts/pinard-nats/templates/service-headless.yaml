@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pinard-nats.fullname" . }}-headless
+  labels:
+    {{- include "pinard-nats.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - port: 4222
+      targetPort: client
+      name: client
+    - port: 6222
+      targetPort: cluster
+      name: cluster
+    - port: 8222
+      targetPort: monitor
+      name: monitor
+    {{- if .Values.websocket.enabled }}
+    - port: {{ .Values.websocket.port }}
+      targetPort: websocket
+      name: websocket
+    {{- end }}
+  selector:
+    {{- include "pinard-nats.selectorLabels" . | nindent 4 }}

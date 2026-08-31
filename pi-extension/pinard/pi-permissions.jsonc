@@ -1,0 +1,13 @@
+{
+  // Conductor: unrestricted file access (orchestrator needs project dirs outside cwd)
+  "defaultPolicy": {
+    "tools": "allow",
+    "bash": "allow",
+    "mcp": "deny",
+    "skills": "allow",
+    "special": "allow"
+  },
+  "special": {
+    "external_directory": "allow"
+  }
+}

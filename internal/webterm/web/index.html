@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pinard · Domaine</title>
+  <style>
+    :root { --bg:#0b0d10; --panel:#14171c; --line:#232830; --fg:#d7dce3; --dim:#8a94a3; --accent:#7cc; }
+    * { box-sizing: border-box; }
+    html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+      font:14px/1.5 -apple-system,Segoe UI,Roboto,monospace; }
+    #app { display:flex; height:100%; }
+    #side { width:240px; flex:0 0 240px; background:var(--panel); border-right:1px solid var(--line);
+      overflow:auto; }
+    .brand { display:flex; align-items:center; gap:10px; padding:14px 14px 12px; border-bottom:1px solid var(--line); }
+    .brand img { height:46px; width:46px; border-radius:50%; }
+    .brand .txt b { display:block; font-size:15px; letter-spacing:.02em; }
+    .brand .txt span { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.12em; }
+    #side h1 { font-size:11px; color:var(--dim); margin:12px 14px 4px; font-weight:600;
+      text-transform:uppercase; letter-spacing:.08em; }
+    .vig { padding:8px 14px; cursor:pointer; border-left:3px solid transparent; }
+    .vig:hover { background:#1b1f26; }
+    .vig.active { background:#1b1f26; border-left-color:var(--accent); }
+    #main { flex:1; overflow:auto; padding:18px 22px; }
+    #main h2 { margin:0 0 12px; font-size:16px; }
+    .group { color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.05em;
+      margin:18px 0 6px; }
+    a.row { display:flex; align-items:center; gap:10px; text-decoration:none; color:var(--fg);
+      padding:8px 10px; border:1px solid var(--line); border-radius:6px; margin:4px 0; background:#0f1216; }
+    a.row:hover { border-color:var(--accent); }
+    div.row { cursor:default; opacity:.8; }
+    .row .ic { width:1.4em; text-align:center; }
+    .row .nm { flex:1; font-family:monospace; }
+    .row .st { color:var(--dim); font-size:12px; }
+    .muted { color:var(--dim); }
+    .err { color:#e77; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="side">
+      <div class="brand">
+        <img src="/sessions/static/logo.png" alt="Pinard" />
+        <div class="txt"><b>Pinard</b><span>Domaine</span></div>
+      </div>
+      <h1>🍇 vignobles</h1>
+      <div id="vigs" class="muted" style="padding:0 14px">loading…</div>
+    </div>
+    <div id="main"><p class="muted">Select a vignoble.</p></div>
+  </div>
+  <script>
+    const $ = (s) => document.querySelector(s);
+    async function api(path) {
+      const r = await fetch(path, { credentials: "same-origin" });
+      if (!r.ok) throw new Error(r.status + " " + (await r.text()).trim());
+      return r.json();
+    }
+    function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    function stateIcon(s){ return s === "active" ? "⚡" : s === "failed" ? "❌" : s ? "💤" : ""; }
+    function termLink(v, target){ return `/sessions?v=${encodeURIComponent(v)}&target=${encodeURIComponent(target)}`; }
+
+    // Role/vineyard emojis: 🎩 régisseur · 🧑‍🌾 maître · 🌿 parcelle · 🧺 vendangeur
+    function rowHTML(v, icon, e){
+      const stText = [e.state ? `${stateIcon(e.state)} ${esc(e.state)}` : "", e.step ? esc(e.step) : ""].filter(Boolean).join(" · ");
+      const st = stText ? `<span class="st">${stText}</span>` : "";
+      const remoteBadge = e.remote ? `<span class="st" title="remote — not attachable yet">🌐</span>` : "";
+      if (e.remote) {
+        return `<div class="row">
+          <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${remoteBadge}</div>`;
+      }
+      return `<a class="row" href="${termLink(v, e.target)}" target="_blank" rel="noopener">
+        <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}</a>`;
+    }
+
+    async function showVignoble(v){
+      document.querySelectorAll(".vig").forEach(el => el.classList.toggle("active", el.dataset.v === v));
+      const main = $("#main");
+      main.innerHTML = `<h2>🍇 ${esc(v)}</h2><p class="muted">loading sessions…</p>`;
+      let idx;
+      try { idx = await api(`/sessions/api/sessions?v=${encodeURIComponent(v)}`); }
+      catch (e) { main.innerHTML = `<h2>🍇 ${esc(v)}</h2><p class="err">${esc(e.message)}</p>`; return; }
+
+      let html = `<h2>🍇 ${esc(v)}</h2>`;
+      if (idx.note) html += `<p class="muted">${esc(idx.note)}</p>`;
+      if (idx.regisseur) html += `<div class="group">🎩 régie</div>` + rowHTML(v, "🎩", idx.regisseur);
+      if (idx.maitres && idx.maitres.length) {
+        html += `<div class="group">🧑‍🌾 maîtres</div>` + idx.maitres.map(e => rowHTML(v, "🧑‍🌾", e)).join("");
+      }
+
+      const vs = idx.vendangeurs || [];
+      html += `<div class="group">🧺 vendangeurs</div>`;
+      if (vs.length) {
+        // Group vendangeurs by parcelle (🌿).
+        const byParcelle = {};
+        for (const e of vs) { (byParcelle[e.parcelle || "—"] ||= []).push(e); }
+        for (const p of Object.keys(byParcelle).sort()) {
+          html += `<div class="group" style="margin-left:6px">🌿 ${esc(p)}</div>`;
+          html += byParcelle[p].map(e => rowHTML(v, "🧺", e)).join("");
+        }
+      } else {
+        html += `<p class="muted">no active vendangeurs</p>`;
+      }
+      main.innerHTML = html;
+    }
+
+    (async function(){
+      let data;
+      try { data = await api("/sessions/api/vignobles"); }
+      catch (e) { $("#vigs").innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
+      const vigs = data.vignobles || [];
+      if (!vigs.length) { $("#vigs").outerHTML = `<div class="muted" style="padding:0 14px">no vignobles</div>`; return; }
+      $("#vigs").outerHTML = vigs.map(v => `<div class="vig" data-v="${esc(v)}">🍇 ${esc(v)}</div>`).join("");
+      document.querySelectorAll(".vig").forEach(el => el.addEventListener("click", () => showVignoble(el.dataset.v)));
+      showVignoble(vigs[0]);
+    })();
+  </script>
+</body>
+</html>

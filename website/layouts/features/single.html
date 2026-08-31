@@ -1,0 +1,61 @@
+{{ define "main" }}
+{{ $photo := .Params.hero_image | default "/images/photos/hero-vineyard.jpg" }}
+{{ $photoPosition := .Params.hero_position | default "center" }}
+{{ $photoPositionMobile := .Params.hero_position_mobile | default $photoPosition }}
+
+<!-- NAV -->
+<nav class="nav scrolled" id="main-nav">
+  <a class="nav-logo" href="/">Pin<span>ard</span></a>
+  <ul class="nav-links">
+    <li><a href="/#the-estate">The Estate</a></li>
+    <li><a href="/#features">The Cellar</a></li>
+    <li><a href="/docs/">The Craft</a></li>
+  </ul>
+  <a class="nav-cta" href="https://github.com/Genentech/pinard">GitHub →</a>
+</nav>
+
+<!-- FEATURE HERO -->
+<header class="feature-hero">
+  <div class="feature-hero-bg{{ if eq .Params.hero_fit "portrait" }} feature-hero-bg-portrait{{ end }}" style="background-image: url('{{ $photo }}'); --photo-position: {{ $photoPosition }}; --photo-position-mobile: {{ $photoPositionMobile }}"></div>
+  <div class="feature-hero-overlay"></div>
+  <div class="feature-hero-content">
+    <a class="feature-back" href="/#features">← The Cellar</a>
+    {{ with .Params.tag }}<span class="feature-hero-tag">{{ . }}</span>{{ end }}
+    <h1 class="feature-hero-title">{{ .Title }}</h1>
+    {{ with .Params.summary }}<p class="feature-hero-summary">{{ . }}</p>{{ end }}
+  </div>
+</header>
+
+<!-- FEATURE BODY -->
+<article class="feature-article">
+  <div class="feature-article-inner">
+    {{ .Content }}
+  </div>
+  <div class="feature-article-nav">
+    <a href="/#features" class="btn-primary">← Back to the Cellar</a>
+  </div>
+</article>
+
+<!-- FOOTER -->
+<footer class="footer">
+  <div class="footer-logo">Pin<span>ard</span></div>
+  <ul class="footer-links">
+    <li><a href="https://github.com/Genentech/pinard">GitHub</a></li>
+    <li><a href="/docs/">The Craft</a></li>
+    <li><a href="https://github.com/Genentech/pinard/blob/main/PINARD.md">PINARD.md</a></li>
+  </ul>
+  <p class="footer-credit">
+    Original artwork created for Pinard ·
+    Built with <a href="https://gohugo.io" target="_blank">Hugo</a>
+  </p>
+</footer>
+
+<script>
+(function() {
+  var nav = document.getElementById('main-nav');
+  window.addEventListener('scroll', function() {
+    nav.classList.toggle('scrolled', window.scrollY > 60);
+  }, { passive: true });
+})();
+</script>
+{{ end }}

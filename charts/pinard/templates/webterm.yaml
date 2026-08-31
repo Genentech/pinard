@@ -1,0 +1,238 @@
+{{- if .Values.webterm.enabled }}
+{{- $c := .Values.webterm }}
+{{- $name := printf "%s-webterm" (include "pinard.fullname" .) }}
+{{- $secretName := printf "%s-secrets" $name }}
+{{- $credName := printf "%s-credentials" $name }}
+{{- $cookieName := printf "%s-cookie" $name }}
+# ── credentials.yaml (non-secret config; secrets via *_env from the Secret) ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $credName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "webterm") | nindent 4 }}
+data:
+  credentials.yaml: |
+    nats:
+      url: {{ $c.nats.url | quote }}
+      user: {{ $c.nats.user | quote }}
+      password_env: PINARD_NATS_PASSWORD
+    webterm:
+      base_url: {{ $c.gateway.baseUrl | quote }}
+      link_secret_env: PINARD_WEBTERM_LINK_SECRET
+      grant_secret_env: PINARD_WEBTERM_GRANT_SECRET
+      link_ttl: {{ $c.gateway.linkTTL | quote }}
+      idle_timeout: {{ $c.gateway.idleTimeout | quote }}
+      max_viewers: {{ $c.gateway.maxViewers }}
+      {{- if $c.gateway.auth.issuer }}
+      auth:
+        issuer: {{ $c.gateway.auth.issuer | quote }}
+        client_id: {{ $c.gateway.auth.clientId | quote }}
+        redirect_url: {{ $c.gateway.auth.redirectUrl | quote }}
+        scopes: [{{ range $i, $s := splitList " " $c.gateway.auth.scopes }}{{ if $i }}, {{ end }}{{ $s | quote }}{{ end }}]
+        cookie_secret_env: PINARD_WEBTERM_COOKIE_SECRET
+        session_ttl: {{ $c.gateway.auth.sessionTTL | quote }}
+      {{- end }}
+---
+# ── session-cookie signing secret (gateway-local; generated + preserved) ──
+{{- $existingCookie := (lookup "v1" "Secret" $.Release.Namespace $cookieName) }}
+{{- $cookie := $c.secrets.cookieSecret }}
+{{- if and (not $cookie) $existingCookie $existingCookie.data (hasKey $existingCookie.data "cookie-secret") }}
+{{- $cookie = (index $existingCookie.data "cookie-secret" | b64dec) }}
+{{- end }}
+{{- if not $cookie }}{{- $cookie = randAlphaNum 48 }}{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $cookieName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "webterm") | nindent 4 }}
+type: Opaque
+data:
+  cookie-secret: {{ $cookie | b64enc | quote }}
+{{- if $c.secrets.vault.enabled }}
+{{- $v := $c.secrets.vault }}
+---
+# ── Vault-backed signing secrets + NATS password (External Secrets Operator) ──
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: {{ $secretName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "webterm") | nindent 4 }}
+spec:
+  refreshInterval: {{ $v.refreshInterval | quote }}
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: {{ $v.secretStore }}
+  target:
+    name: {{ $secretName }}
+    creationPolicy: Owner
+  data:
+    - secretKey: link-secret
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.linkSecretKey }} }
+    - secretKey: grant-secret
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.grantSecretKey }} }
+    - secretKey: nats-password
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.natsPasswordKey }} }
+{{- else }}
+---
+# ── literal signing secrets + NATS password (preserved across upgrades) ──
+{{- $existing := (lookup "v1" "Secret" $.Release.Namespace $secretName) }}
+{{- $link := $c.secrets.linkSecret }}
+{{- $grant := $c.secrets.grantSecret }}
+{{- $natsPass := $c.secrets.natsPassword }}
+{{- if and $existing $existing.data }}
+{{- if not $link }}{{- $link = (index $existing.data "link-secret" | b64dec) }}{{- end }}
+{{- if not $grant }}{{- $grant = (index $existing.data "grant-secret" | b64dec) }}{{- end }}
+{{- if not $natsPass }}{{- $natsPass = (index $existing.data "nats-password" | b64dec) }}{{- end }}
+{{- end }}
+{{- if not $link }}{{- $link = randAlphaNum 48 }}{{- end }}
+{{- if not $grant }}{{- $grant = randAlphaNum 48 }}{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "webterm") | nindent 4 }}
+type: Opaque
+data:
+  link-secret: {{ $link | b64enc | quote }}
+  grant-secret: {{ $grant | b64enc | quote }}
+  nats-password: {{ $natsPass | b64enc | quote }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "webterm") | nindent 4 }}
+spec:
+  replicas: {{ $c.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "pinard.selectorLabels" (dict "root" $ "component" "webterm") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ $c.gateway | toYaml | sha256sum }}
+      labels:
+        {{- include "pinard.selectorLabels" (dict "root" $ "component" "webterm") | nindent 8 }}
+    spec:
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: gateway
+          image: "{{ $c.image.repository }}:{{ $c.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          env:
+            - name: PINARD_CREDENTIALS
+              value: /etc/pinard/credentials.yaml
+            {{- if $c.gateway.vignobles }}
+            - name: WEBTERM_VIGNOBLES
+              value: {{ join "," $c.gateway.vignobles | quote }}
+            {{- else if $c.gateway.vignoble }}
+            - name: NATS_VIGNOBLE
+              value: {{ $c.gateway.vignoble | quote }}
+            {{- end }}
+            - name: WEBTERM_ADDR
+              value: ":{{ $c.gateway.listenPort }}"
+            - name: PINARD_WEBTERM_LINK_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $secretName }}, key: link-secret } }
+            - name: PINARD_WEBTERM_GRANT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $secretName }}, key: grant-secret } }
+            - name: PINARD_NATS_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ $secretName }}, key: nats-password } }
+            - name: PINARD_WEBTERM_COOKIE_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $cookieName }}, key: cookie-secret } }
+          ports:
+            - name: http
+              containerPort: {{ $c.gateway.listenPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - name: credentials
+              mountPath: /etc/pinard
+              readOnly: true
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      volumes:
+        - name: credentials
+          configMap:
+            name: {{ $credName }}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "webterm") | nindent 4 }}
+spec:
+  type: {{ $c.service.type }}
+  ports:
+    - name: http
+      port: {{ $c.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "pinard.selectorLabels" (dict "root" $ "component" "webterm") | nindent 4 }}
+{{- if $c.ingressRoute.enabled }}
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "webterm") | nindent 4 }}
+  {{- with $c.ingressRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  entryPoints:
+    {{- toYaml $c.ingressRoute.entryPoints | nindent 4 }}
+  routes:
+    - match: Host(`{{ required "webterm.ingressRoute.host is required" $c.ingressRoute.host }}`) && PathPrefix(`{{ $c.ingressRoute.pathPrefix }}`)
+      kind: Rule
+      services:
+        - name: {{ $name }}
+          port: {{ $c.service.port }}
+      {{- with $c.ingressRoute.middlewares }}
+      middlewares:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with $c.ingressRoute.authCallbackPath }}
+    - match: Host(`{{ $c.ingressRoute.host }}`) && Path(`{{ . }}`)
+      kind: Rule
+      services:
+        - name: {{ $name }}
+          port: {{ $c.service.port }}
+      {{- with $c.ingressRoute.middlewares }}
+      middlewares:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,14 @@
+{
+  // Worker: restricted to its worktree
+  "defaultPolicy": {
+    "tools": "allow",
+    "bash": "allow",
+    "mcp": "deny",
+    "skills": "allow",
+    "special": "allow"
+  },
+  "special": {
+    // Block file tools (read/write/grep/find/ls) outside cwd (the worktree)
+    "external_directory": "deny"
+  }
+}

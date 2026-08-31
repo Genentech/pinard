@@ -1,0 +1,76 @@
+replicaCount: 3
+
+image:
+  repository: nats
+  tag: "2.10.18-alpine"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  clientPort: 4222
+  monitorPort: 8222
+
+websocket:
+  enabled: false
+  port: 8443
+  ingressRoute:
+    enabled: false
+    host: ""
+    entryPoints:
+      - websecure
+    annotations: {}
+    middlewares: []
+    tls: {}
+
+jetstream:
+  enabled: true
+  maxMemory: 1Gi
+  maxFile: 10Gi
+
+# Leave empty — passwords are auto-generated in the Secret on first install.
+# The Secret has resource-policy: keep so it survives upgrades/uninstalls.
+sysPassword: ""
+
+# Per-user accounts (each isolated with its own JetStream namespace)
+accounts: []
+  # - name: lelongs
+  # - name: coworker
+
+# Use an existing secret instead of creating one (keys: sys-password, {name}-password)
+existingSecret: ""
+
+# Vault-backed auth (External Secrets Operator). When enabled, the chart does NOT
+# generate passwords or inline them into the config; instead an ExternalSecret pulls
+# each password from Vault into the auth Secret, and nats-server expands them from
+# env ($NATS_SYS_PASSWORD / $NATS_PW_<ACCOUNT>). Seed Vault with the CURRENT
+# passwords first, or existing clients break.
+vault:
+  enabled: false
+  secretStore: vault-cluster-store   # ClusterSecretStore name
+  refreshInterval: 1h
+  path: huge/pinard                  # Vault KV path
+  sysPasswordKey: nats_sys_passwd    # Vault property for the SYS account
+  # Map each account name -> its Vault property (key within `path`).
+  accountPasswordKeys: {}
+    # lelongs: nats_lelongs_passwd
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClassName: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

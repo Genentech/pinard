@@ -1,0 +1,336 @@
+{{- if .Values.memory.enabled }}
+{{- $c := .Values.memory }}
+{{- $name := printf "%s-memory" (include "pinard.fullname" .) }}
+{{- $surrealName := printf "%s-surrealdb" (include "pinard.fullname" .) }}
+{{- $secretName := printf "%s-secrets" $name }}
+{{- $vaultSecretName := printf "%s-vault" $name }}
+{{- $sshSecretName := printf "%s-ssh" $name }}
+{{- $sshConfigMapName := printf "%s-ssh-config" $name }}
+{{- $vignesConfigMapName := printf "%s-vignes" $name }}
+{{- $hasNatsCreds := and $c.vault.enabled $c.vault.natsPasswordKey }}
+{{- $hasEngramRoDsn := and $c.vault.enabled $c.vault.engramRoDsnKey }}
+{{- $hasVignes := and $c.vignes $c.vignes.data }}
+{{- $sshKey := "" }}
+{{- if and $c.vault.enabled $c.vault.sshKey }}
+{{- $sshKey = $c.vault.sshKey }}
+{{- else if and $c.ssh $c.ssh.vault $c.ssh.vault.sshKey }}
+{{- $sshKey = $c.ssh.vault.sshKey }}
+{{- end }}
+{{- $hasSsh := ne $sshKey "" }}
+{{- $sshHost := "" }}
+{{- if and $c.wikiRepos $c.wikiRepos.sshHost }}
+{{- $sshHost = $c.wikiRepos.sshHost }}
+{{- end }}
+{{- $sshKnownHosts := "" }}
+{{- if and $c.wikiRepos $c.wikiRepos.sshKnownHosts }}
+{{- $sshKnownHosts = $c.wikiRepos.sshKnownHosts }}
+{{- end }}
+{{- $gitEmail := "pinard@example.com" }}
+{{- if and $c.wikiRepos $c.wikiRepos.gitEmail }}
+{{- $gitEmail = $c.wikiRepos.gitEmail }}
+{{- end }}
+{{- $cloneDir := "/data/repos" }}
+{{- if and $c.wikiRepos $c.wikiRepos.cloneDir }}
+{{- $cloneDir = $c.wikiRepos.cloneDir }}
+{{- end }}
+{{- $vignobleCloneDir := printf "%s/vignobles" $cloneDir }}
+{{- $globalWikiCloneDir := printf "%s/pinard-wiki" $cloneDir }}
+{{- if $hasVignes }}
+---
+# ── vignes.yaml ConfigMap: vigne→vignoble membership for ScopeRollupEngine ──
+# Superseded by wikiRepos.vignoble clone when that is set.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $vignesConfigMapName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "memory") | nindent 4 }}
+data:
+  vignes.yaml: |
+    {{- $c.vignes.data | nindent 4 }}
+{{- end }}
+{{- if $hasSsh }}
+---
+# ── SSH ConfigMap: ~/.ssh/config (per-host) + known_hosts (pinned) ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $sshConfigMapName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "memory") | nindent 4 }}
+data:
+  ssh_config: |
+    Host {{ $sshHost }}
+        User git
+        IdentityFile /secrets/ssh/{{ $sshKey }}
+        IdentitiesOnly yes
+  known_hosts: |
+    {{ $sshKnownHosts }}
+{{- end }}
+{{- if $c.vault.enabled }}
+{{- $v := $c.vault }}
+---
+# ── Vault-backed memory secrets: surrealdb root-pass + gemini SA JSON (+ optional SSH key) ──
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: {{ $vaultSecretName }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "memory") | nindent 4 }}
+spec:
+  refreshInterval: {{ $v.refreshInterval | quote }}
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: {{ $v.secretStore }}
+  target:
+    name: {{ $vaultSecretName }}
+    creationPolicy: Owner
+  data:
+    - secretKey: root-pass
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.passwdKey }} }
+    - secretKey: sa.json
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.geminiSaKey }} }
+    {{- if $v.natsPasswordKey }}
+    - secretKey: nats-password
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.natsPasswordKey }} }
+    {{- end }}
+    {{- if $v.engramRoDsnKey }}
+    - secretKey: engram-ro-dsn
+      remoteRef: { key: {{ $v.path }}, property: {{ $v.engramRoDsnKey }} }
+    {{- end }}
+    {{- if $hasSsh }}
+    - secretKey: {{ $sshKey }}
+      remoteRef: { key: {{ $v.path }}, property: {{ $sshKey }} }
+    {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pinard.labels" (dict "root" $ "component" "memory") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "pinard.selectorLabels" (dict "root" $ "component" "memory") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ $c.config | toYaml | sha256sum }}
+      labels:
+        {{- include "pinard.selectorLabels" (dict "root" $ "component" "memory") | nindent 8 }}
+    spec:
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $hasSsh }}
+      initContainers:
+        - name: git-clone
+          image: "{{ $c.image.repository }}:{{ $c.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command:
+            - sh
+            - -exc
+            - |
+              mkdir -p ~/.ssh
+              cp /secrets/ssh/{{ $sshKey }} ~/.ssh/{{ $sshKey }}
+              chmod 0400 ~/.ssh/{{ $sshKey }}
+              cp /etc/ssh-config/ssh_config ~/.ssh/config
+              chmod 0600 ~/.ssh/config
+              cp /etc/ssh-config/known_hosts ~/.ssh/known_hosts
+              git config --global user.name "pinard"
+              git config --global user.email "{{ $gitEmail }}"
+              python -m services.memory.wiki.clone_vignobles
+          env:
+            - name: CLONE_BASE_DIR
+              value: {{ $cloneDir | quote }}
+            {{- if and $c.wikiRepos $c.wikiRepos.pinardWiki }}
+            - name: PINARD_WIKI_REPO
+              value: {{ $c.wikiRepos.pinardWiki | quote }}
+            {{- end }}
+            {{- if and $c.wikiRepos $c.wikiRepos.sshHost }}
+            - name: GITLAB_SSH_HOST
+              value: {{ $c.wikiRepos.sshHost | quote }}
+            {{- end }}
+            {{- if $hasNatsCreds }}
+            - name: NATS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $vaultSecretName }}
+                  key: nats-password
+            - name: NATS_URL
+              value: {{ printf "nats://%s:$(NATS_PASSWORD)@%s" $c.config.natsUser (trimPrefix "nats://" $c.config.natsUrl) | quote }}
+            {{- else }}
+            - name: NATS_URL
+              value: {{ $c.config.natsUrl | quote }}
+            {{- end }}
+            - name: NATS_VIGNOBLE
+              value: {{ $c.config.natsVignoble | quote }}
+          volumeMounts:
+            - name: ssh-key
+              mountPath: /secrets/ssh
+              readOnly: true
+            - name: ssh-config
+              mountPath: /etc/ssh-config
+              readOnly: true
+            - name: repos
+              mountPath: {{ $cloneDir | quote }}
+      {{- end }}
+      containers:
+        - name: memory
+          image: "{{ $c.image.repository }}:{{ $c.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command: {{ toYaml $c.command | nindent 12 }}
+          env:
+            - name: SURREAL_URL
+              value: "http://{{ $surrealName }}:8000"
+            - name: SURREAL_USER
+              value: {{ $c.config.surrealUser | quote }}
+            - name: SURREAL_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if $c.vault.enabled }}{{ $vaultSecretName }}{{ else }}{{ $secretName }}{{ end }}
+                  key: root-pass
+            - name: ENGRAM_URL
+              value: {{ $c.config.engramUrl | quote }}
+            - name: ROSETTA_URL
+              value: {{ $c.config.rosettaUrl | quote }}
+            {{- if $hasNatsCreds }}
+            - name: NATS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $vaultSecretName }}
+                  key: nats-password
+            - name: NATS_URL
+              value: {{ printf "nats://%s:$(NATS_PASSWORD)@%s" $c.config.natsUser (trimPrefix "nats://" $c.config.natsUrl) | quote }}
+            {{- else }}
+            - name: NATS_URL
+              value: {{ $c.config.natsUrl | quote }}
+            {{- end }}
+            - name: NATS_VIGNOBLE
+              value: {{ $c.config.natsVignoble | quote }}
+            - name: MEMORY_ENGRAM_SOURCE
+              value: {{ $c.config.engramSource | default "http" | quote }}
+            {{- if $c.config.vignobleBaseDir }}
+            - name: VIGNOBLES_BASE_DIR
+              value: {{ $c.config.vignobleBaseDir | quote }}
+            {{- end }}
+            - name: SSL_CERT_FILE
+              value: {{ $c.config.sslCertFile | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+            - name: REQUESTS_CA_BUNDLE
+              value: {{ $c.config.requestsCaBundle | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+            {{- if $hasEngramRoDsn }}
+            - name: ENGRAM_PG_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $vaultSecretName }}
+                  key: engram-ro-dsn
+            {{- end }}
+            - name: WORKER_GROUP_ID
+              value: {{ $c.config.workerGroupId | quote }}
+            - name: MEMORY_LLM_API
+              value: {{ $c.config.llmApi | quote }}
+            - name: MEMORY_LLM_AUTH
+              value: {{ $c.config.llmAuth | quote }}
+            - name: MEMORY_LLM_MODEL
+              value: {{ $c.config.llmModel | quote }}
+            - name: MEMORY_LLM_BASE_URL
+              value: {{ $c.config.llmBaseUrl | quote }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/secrets/gemini/sa.json"
+            - name: VIGNOBLE_LOGS
+              value: "/tmp/memory-logs"
+            {{- if $hasSsh }}
+            - name: VIGNOBLE_DIR
+              value: {{ $vignobleCloneDir | quote }}
+            - name: GLOBAL_WIKI_ROOT
+              value: {{ $globalWikiCloneDir | quote }}
+            {{- else if $hasVignes }}
+            - name: VIGNOBLE_DIR
+              value: {{ $c.vignes.mountPath | default "/etc/pinard" | quote }}
+            {{- end }}
+            {{- if $hasSsh }}
+            - name: GIT_SSH_COMMAND
+              value: {{ printf "ssh -i /secrets/ssh/%s -o IdentitiesOnly=yes -o UserKnownHostsFile=/etc/ssh-config/known_hosts -o StrictHostKeyChecking=yes" $sshKey | quote }}
+            - name: GIT_AUTHOR_NAME
+              value: pinard
+            - name: GIT_AUTHOR_EMAIL
+              value: {{ $gitEmail | quote }}
+            - name: GIT_COMMITTER_NAME
+              value: pinard
+            - name: GIT_COMMITTER_EMAIL
+              value: {{ $gitEmail | quote }}
+            {{- end }}
+          volumeMounts:
+            {{- if $c.vault.enabled }}
+            - name: gemini-sa
+              mountPath: /secrets/gemini
+              readOnly: true
+            {{- end }}
+            {{- if $hasSsh }}
+            - name: ssh-key
+              mountPath: /secrets/ssh
+              readOnly: true
+            - name: ssh-config
+              mountPath: /etc/ssh-config
+              readOnly: true
+            {{- end }}
+            {{- if $hasVignes }}
+            - name: vignes-config
+              mountPath: {{ $c.vignes.mountPath | default "/etc/pinard" | quote }}
+              readOnly: true
+            {{- end }}
+            {{- if $hasSsh }}
+            - name: repos
+              mountPath: {{ $cloneDir | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      volumes:
+        {{- if $c.vault.enabled }}
+        - name: gemini-sa
+          secret:
+            secretName: {{ $vaultSecretName }}
+            items:
+              - key: sa.json
+                path: sa.json
+        {{- end }}
+        {{- if $hasSsh }}
+        - name: ssh-key
+          secret:
+            secretName: {{ $vaultSecretName }}
+            items:
+              - key: {{ $sshKey }}
+                path: {{ $sshKey }}
+                mode: 0400
+        - name: ssh-config
+          configMap:
+            name: {{ $sshConfigMapName }}
+        {{- end }}
+        {{- if $hasVignes }}
+        - name: vignes-config
+          configMap:
+            name: {{ $vignesConfigMapName }}
+        {{- end }}
+        {{- if $hasSsh }}
+        - name: repos
+          emptyDir: {}
+        {{- end }}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

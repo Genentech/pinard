@@ -1,0 +1,23 @@
+# Pinard vignoble config — copy to your vignoble directory as vignes.yaml.
+# Run `aoc init <name>` to scaffold a vignoble directory with a starter config.
+
+gitlab_host: gitlab.example.com   # GitLab API hostname (no scheme)
+gitlab_group: your-group          # GitLab group/namespace for repos
+auto_merge: true                  # auto-merge MRs when CI passes + approved
+
+models:
+  conductor:
+    id: claude-opus-4-6           # model for the régisseur/maîtres
+  worker:
+    id: claude-sonnet-4-6         # default model for vendangeurs
+
+vignes:
+  my-project:
+    path: ~/my-project            # local clone path
+    repo: your-group/my-project   # GitLab repo path (group/project)
+    auto_merge: true
+    # model:
+    #   id: claude-opus-4-6       # per-vigne model override
+    # tests:
+    #   strategy: local
+    #   command: make test

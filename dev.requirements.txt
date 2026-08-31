@@ -1,0 +1,21 @@
+# formalint
+black>=23.1.0
+isort>=5.12.0
+mypy>=1.1.1
+ruff>=0.0.259
+vulture>=2.7
+# testing
+coverage>=7.2.2
+pytest>=6.2.4   # gpapy version
+pytest-timeout>=2.1.0
+# admin
+ipython>=8.12.0
+# manage secrets:
+PyYAML==6.0.1
+boto3==1.26.118
+commitizen==3.10.1
+pre-commit==3.5.0
+copier==8.0.0
+pyyaml-include==1.3.2
+pydantic<2.0.0
+pytest-cov>=4.1.0

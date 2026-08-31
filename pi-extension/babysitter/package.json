@@ -1,0 +1,7 @@
+{
+  "name": "pinard-babysitter",
+  "version": "0.1.0",
+  "description": "Pi extension for babysitter process orchestration — inert when no process is set",
+  "main": "index.ts",
+  "dependencies": {}
+}

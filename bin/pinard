@@ -1,0 +1,815 @@
+#!/usr/bin/env bash
+# Pinard — multi-agent orchestrator
+# Run from anywhere: lists vignobles and attaches via fzf
+# Run from a vignoble dir: starts the conductor for that vignoble
+
+# PINARD_HOME = the install/bundle root (parent of this launcher's dir).
+# In a distributed bundle this is ~/.pinard and contains a vendored Node+Pi
+# under runtime/. From a source checkout it is the repo root.
+PINARD_HOME="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+
+# Runtime resolution: prefer the bundled Node/Pi, then fall back to nvm, then PATH.
+# The bundle ships runtime/bin/{node,pi} so no system Node/nvm/npm is required.
+if [ -x "$PINARD_HOME/runtime/bin/node" ]; then
+  export PATH="$PINARD_HOME/runtime/bin:$PATH"
+elif [ -s "$HOME/.nvm/nvm.sh" ]; then
+  source "$HOME/.nvm/nvm.sh"
+  nvm use default >/dev/null 2>&1
+fi
+
+# PINARD_NODE: explicit node binary override. Prepend its directory to PATH so
+# all child processes (pi, mcp, babysitter) inherit the correct node version.
+# Takes effect AFTER the bundled runtime check — if a bundle is present it wins.
+# Set this to pin a specific node when the nvm default is too old.
+if [[ -n "${PINARD_NODE:-}" && -x "$PINARD_NODE" ]]; then
+  export PATH="$(dirname "$PINARD_NODE"):$PATH"
+fi
+
+# Guard: fail fast if the resolved node is too old. pi requires node >=22.19.0;
+# running pi under an older node (e.g. v20) causes an undici crash that is
+# impossible to diagnose from the symptom (worker hangs, never responds to babysitter).
+_node_ver="$(node -v 2>/dev/null | sed 's/^v//')"
+_node_ok() {
+  local ver="$1" min="22.19.0"
+  local vmaj vmin vpatch mmaj mmin mpatch
+  IFS=. read -r vmaj vmin vpatch <<< "$ver"
+  IFS=. read -r mmaj mmin mpatch <<< "$min"
+  vmaj=${vmaj:-0}; vmin=${vmin:-0}; vpatch=${vpatch:-0}
+  mmaj=${mmaj:-0}; mmin=${mmin:-0}; mpatch=${mpatch:-0}
+  (( vmaj > mmaj )) && return 0
+  (( vmaj < mmaj )) && return 1
+  (( vmin > mmin )) && return 0
+  (( vmin < mmin )) && return 1
+  (( vpatch >= mpatch )) && return 0
+  return 1
+}
+if [[ -z "$_node_ver" ]]; then
+  echo "pinard: node not found in PATH — pi requires node >=22.19.0. Install it (e.g. nvm install 22) and restart." >&2
+  exit 1
+fi
+if ! _node_ok "$_node_ver"; then
+  echo "pinard: node v${_node_ver} too old — pi requires >=22.19.0. Activate a compatible node (e.g. nvm use 22) and restart." >&2
+  exit 1
+fi
+unset _node_ver _node_ok
+
+VIGNOBLE_ROOT="${VIGNOBLE_ROOT:-$HOME}"
+
+# List all pinard tmux sessions across all vignoble sockets (format: socket:session)
+_pinard_sessions() {
+  local uid
+  uid="$(id -u)"
+  local sock_dir="/tmp/tmux-${uid}"
+  [[ -d "$sock_dir" ]] || return
+  for sock in "$sock_dir"/pinard-*; do
+    [[ -S "$sock" ]] || continue
+    local name="${sock##*/pinard-}"
+    tmux -L "pinard-$name" list-sessions -F "pinard-${name}:#{session_name}" 2>/dev/null
+  done
+}
+
+# Find vignoble and handle flags
+VIGNOBLE=""
+STANDALONE=""        # set when --vignoble-name is used (remote worker, no vignoble dir)
+VIGNOBLE_NAME=""
+MAITRE_PARCELLE="" # set when running as a per-parcelle maître (scoped conductor)
+_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vignoble) VIGNOBLE="$2"; shift 2 ;;
+    --maitre) MAITRE_PARCELLE="$2"; shift 2 ;;
+    # Standalone/remote worker: identify the vignoble by NAME only (NATS
+    # namespace). No vignoble directory is required on this machine; the worker
+    # gets its config from explicit flags + ~/.config/pinard. Keep --vignoble-name
+    # in the forwarded args so the worker arg-parser also sees it.
+    --vignoble-name) STANDALONE=1; VIGNOBLE_NAME="$2"; _ARGS+=("$1" "$2"); shift 2 ;;
+    --restart)
+      echo "Restarting pinard sessions..."
+      # Kill existing tmux sessions for all vignobles
+      uid="$(id -u)"
+      for sock in "/tmp/tmux-${uid}"/pinard-*; do
+        [[ -S "$sock" ]] || continue
+        name="${sock##*/}"
+        tmux -L "$name" kill-server 2>/dev/null || true
+      done
+      shift
+      ;;
+    *) _ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${_ARGS[@]}"
+
+# Standalone (remote worker): no vignoble directory — config comes from explicit
+# flags + ~/.config/pinard. Skip vignoble resolution and the $VIGNOBLE-derived
+# exports; only the global secrets/NATS env below are needed.
+if [[ -z "$STANDALONE" ]]; then
+  if [[ -z "$VIGNOBLE" && -f "vignes.yaml" ]]; then
+    VIGNOBLE="$(pwd)"
+  fi
+
+  # If no vignoble specified and not inside one, offer a picker
+  if [[ -z "$VIGNOBLE" || ! -f "$VIGNOBLE/vignes.yaml" ]]; then
+    if command -v fzf &>/dev/null; then
+      # Pick a vignoble to launch/attach
+      selected="$(for vb_dir in "$VIGNOBLE_ROOT"/vignoble-*; do
+        [[ -f "$vb_dir/vignes.yaml" ]] || continue
+        basename "$vb_dir" | sed 's/^vignoble-//'
+      done | fzf --prompt="vignoble> " --header="Select a vignoble to start")"
+      if [[ -n "$selected" ]]; then
+        VIGNOBLE="$VIGNOBLE_ROOT/vignoble-$selected"
+      else
+        exit 0
+      fi
+    else
+      echo "Error: no vignoble found. Run from a vignoble directory or use: pinard --vignoble <path> (or --vignoble-name <name> for a standalone worker)" >&2
+      exit 1
+    fi
+  fi
+
+  export AOC_CONFIG="$VIGNOBLE/vignes.yaml"
+  export AOC_SCHEDULES="$VIGNOBLE/schedules.yaml"
+  export ENGRAM_DATA_DIR="$VIGNOBLE/.engram"
+  VIGNOBLE_NAME="$(basename "$VIGNOBLE" | sed 's/^vignoble-//')"
+else
+  # Standalone (HPC worker, no vignoble dir): scope engram to the worker's OWN
+  # project cwd (.engram) instead of the shared ~/.engram default — so concurrent
+  # runs/projects on a node don't collide in one sqlite store. An explicit
+  # ENGRAM_DATA_DIR (e.g. a bound persistent path set by the run.sh entrypoint) wins.
+  export ENGRAM_DATA_DIR="${ENGRAM_DATA_DIR:-$PWD/.engram}"
+fi
+
+# Per-vignoble engram port isolation. gentle-engram attaches to whatever is on
+# ENGRAM_PORT (default 7437); a foreign `engram serve` on that port silently
+# commingles all vignobles' memories in one store. Fix: derive a deterministic
+# port from the vignoble name (cksum hash → range 7500-8499) so each vignoble
+# gets its own isolated serve+store. Inherited by every child process (pi, mcp,
+# the spawned `engram serve`). Do not override an explicit ENGRAM_PORT — lets
+# operators pin a port when the hash collides or for testing.
+if [[ -z "${ENGRAM_PORT:-}" && -n "$VIGNOBLE_NAME" ]]; then
+  export ENGRAM_PORT=$(( $(printf '%s' "$VIGNOBLE_NAME" | cksum | awk '{print $1}') % 1000 + 7500 ))
+fi
+
+# Point VIGNOBLE agent roles at the daemon-owned serve so gentle-engram attaches
+# rather than spawning its own. For a vignoble, `aoc env-exports` (below) is the
+# authoritative source of ENGRAM_PORT/ENGRAM_URL and overrides any stale inherited
+# value. Standalone workers get their ENGRAM_URL in the explicit self-serve block
+# below (after STANDALONE is set and ENGRAM_PORT is computed).
+if [[ -z "$STANDALONE" && -n "${ENGRAM_PORT:-}" && -z "${ENGRAM_URL:-}" ]]; then
+  export ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+fi
+
+# Standalone self-serve: no daemon is present to own `engram serve`, so
+# bin/pinard starts it here and sets ENGRAM_URL so the health gate below applies
+# uniformly (same fail-fast path as the vignoble route). ENGRAM_PORT is now set
+# (cksum-computed above or inherited from the environment). If the serve is
+# already healthy (e.g. a persistent container reuse), skip the spawn. Fail
+# fast when the engram binary is missing — mem_* cannot work without it.
+if [[ -n "$STANDALONE" && -n "${ENGRAM_PORT:-}" ]]; then
+  export ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+  if ! curl -sf --connect-timeout 0.5 "${ENGRAM_URL}/health" -o /dev/null 2>/dev/null; then
+    if command -v engram &>/dev/null; then
+      mkdir -p "$ENGRAM_DATA_DIR"
+      ENGRAM_DATA_DIR="$ENGRAM_DATA_DIR" ENGRAM_PORT="$ENGRAM_PORT" \
+        engram serve --port "${ENGRAM_PORT}" >/dev/null 2>&1 &
+      _ENGRAM_SERVE_PID=$!
+      echo "[pinard] standalone: started engram serve pid ${_ENGRAM_SERVE_PID} on port ${ENGRAM_PORT} (data dir: ${ENGRAM_DATA_DIR})" >&2
+      unset _ENGRAM_SERVE_PID
+    else
+      echo "pinard: FATAL: standalone worker requires the engram binary for mem_* — install engram and ensure it is on PATH" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# Guard: warn if a serve is on the legacy default port (7437) that is NOT our
+# isolated port. It can no longer capture our mem_* (we use ENGRAM_PORT above),
+# but a leftover serve on 7437 wastes resources and may confuse other tools.
+if [[ -n "${ENGRAM_PORT:-}" && "${ENGRAM_PORT}" != "7437" ]]; then
+  if curl -sf --connect-timeout 0.5 http://127.0.0.1:7437/health -o /dev/null 2>/dev/null; then
+    echo "pinard: notice: stray 'engram serve' detected on default port 7437 — this vignoble uses port ${ENGRAM_PORT} and is fully isolated; the stray serve has no effect here" >&2
+  fi
+fi
+
+# Guard: warn if our computed port already has a serve bound to a different
+# ENGRAM_DATA_DIR — a hash collision between two vignobles on the same host.
+# Key on data dir (from /proc/<pid>/environ), not cwd, so a same-vignoble worker
+# serve (cwd=worktree, correct data dir) never triggers a false warning.
+if [[ -n "${ENGRAM_PORT:-}" && -n "$VIGNOBLE_NAME" ]]; then
+  _engram_pid="$(ss -ltnp "sport = :${ENGRAM_PORT}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)"
+  if [[ -z "$_engram_pid" ]]; then
+    _engram_pid="$(lsof -iTCP:${ENGRAM_PORT} -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  fi
+  if [[ -n "$_engram_pid" && -r "/proc/$_engram_pid/environ" ]]; then
+    _serve_data_dir="$(tr '\0' '\n' < "/proc/$_engram_pid/environ" 2>/dev/null | grep '^ENGRAM_DATA_DIR=' | cut -d= -f2-)"
+    if [[ -n "$_serve_data_dir" && "$_serve_data_dir" != "$ENGRAM_DATA_DIR" ]]; then
+      echo "pinard: WARNING: port ${ENGRAM_PORT} is in use by a serve for a DIFFERENT vignoble (data dir: $_serve_data_dir) — memory isolation may be broken! Kill that serve and restart." >&2
+    fi
+    unset _serve_data_dir
+  fi
+  unset _engram_pid
+fi
+
+export NODE_TLS_REJECT_UNAUTHORIZED=0
+# Silence Node runtime warnings for pinard and every child node process (pi,
+# mcp-bridge, …): the node:sqlite ExperimentalWarning and the
+# NODE_TLS_REJECT_UNAUTHORIZED=0 insecure-TLS warning. Both are knowingly accepted
+# (self-signed internal certs); the noise clutters the session output.
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--no-warnings"
+
+# Source secrets (env vars referenced by credentials.yaml)
+PINARD_ENV="${PINARD_ENV:-$HOME/.config/pinard/env}"
+[[ -f "$PINARD_ENV" ]] && set -a && source "$PINARD_ENV" && set +a
+
+# Load credentials → export GitLab/NATS env. `aoc env-exports` parses
+# credentials.yaml in Go (resolving the token_env/password_env indirection) and
+# prints shell `export` lines; warnings for unset secret vars go to stderr.
+# Reads ~/.config/pinard/credentials.yaml only — no vignoble needed.
+if command -v aoc &>/dev/null; then
+  eval "$(aoc env-exports)"
+  # pi reads its provider registry from ~/.pi/agent/models.json. A sandboxed worker
+  # (singularity --containall) starts with an empty ~/.pi, so the proxy provider is
+  # unknown at startup and `--models proxy/<id>` resolves to nothing. Seed it from
+  # ~/.claude/settings.json before launching pi (idempotent; skips if already set).
+  aoc ensure-proxy-provider 2>/dev/null || true
+fi
+
+# Engram central backend (opt-in, non-fatal). If credentials provided a cloud token
+# + server (via env-exports above), point local-first engram at it and enroll this
+# vignoble's project for replication. Absent → no-op (engram stays purely local).
+# Every step is guarded so an unreachable server / bad token never blocks startup —
+# the local store remains the source of truth.
+_ENGRAM_CLOUD_ACTIVE=0
+if command -v engram &>/dev/null && [[ -n "${ENGRAM_CLOUD_TOKEN:-}" && -n "${ENGRAM_CLOUD_SERVER:-}" ]]; then
+  engram cloud config --server "$ENGRAM_CLOUD_SERVER" >/dev/null 2>&1 \
+    || echo "pinard: warning: 'engram cloud config' failed — replication off, local memory unaffected" >&2
+  # Set a role-scoped ENGRAM_PROJECT so memory is cleanly separated by agent role:
+  #   régisseur  → vignoble-<name>   (full prefixed form; daemon syncs all projects)
+  #   maître     → parcelle-<name>   (set per-role just before each launch below)
+  #   vendangeur → <vigne>           (bare project name; same repo = same memory)
+  # This early block sets the régisseur/standalone default. Per-role overrides happen
+  # in the worker and maître launch blocks further below.
+  # ENGRAM_PROJECT is inherited by the mem_* MCP server under pi.
+  if [[ -z "${ENGRAM_PROJECT:-}" ]]; then
+    if [[ -n "$VIGNOBLE" ]]; then
+      # Use the full prefixed vignoble name (e.g. vignoble-exohub), not the stripped form.
+      export ENGRAM_PROJECT="$(basename "$VIGNOBLE")"
+    elif [[ -n "$VIGNOBLE_NAME" ]]; then
+      # Standalone worker: vignoble-<name> constructed from the name flag.
+      export ENGRAM_PROJECT="vignoble-$VIGNOBLE_NAME"
+    fi
+  fi
+  if [[ -n "$ENGRAM_PROJECT" ]]; then
+    engram cloud enroll "$ENGRAM_PROJECT" >/dev/null 2>&1 \
+      || echo "pinard: warning: 'engram cloud enroll $ENGRAM_PROJECT' failed — project may not sync" >&2
+    # Drain any pending mutations accumulated while autosync was unavailable (e.g.
+    # daemon restart without token, or token added after previous run). Non-fatal:
+    # a stale backlog is synced now; failure leaves autosync to retry later.
+    engram sync --cloud --project "$ENGRAM_PROJECT" >/dev/null 2>&1 \
+      || echo "pinard: warning: startup 'engram sync --cloud' failed — backlog will retry via autosync" >&2
+    _ENGRAM_CLOUD_ACTIVE=1
+  fi
+  # Enable background autosync so saved memories replicate to the cloud without a
+  # manual `engram sync --cloud`. Honored by the engram runtime (incl. the mem_* MCP
+  # server) inherited by pi and its children. Requires the token + server set above.
+  export ENGRAM_CLOUD_AUTOSYNC=1
+fi
+
+# _engram_sync_loop — periodic background flush (every 5 min) so writes that
+# accumulate during a long session are pushed even if autosync misses some.
+# Self-exits when the parent shell exits (relies on the subshell's PPID check).
+#
+# STANDALONE ONLY: on the pinard host the always-on daemon owns the periodic
+# drain (aoc daemon → EngramSyncer). This loop is kept for standalone HPC workers
+# (--vignoble-name) where no daemon runs. All invocations are gated on $STANDALONE.
+_engram_sync_loop() {
+  local ppid="$1" project="$2" interval="${ENGRAM_SYNC_INTERVAL:-300}"
+  while kill -0 "$ppid" 2>/dev/null; do
+    sleep "$interval"
+    kill -0 "$ppid" 2>/dev/null || break
+    engram sync --cloud --project "$project" >/dev/null 2>&1 \
+      || echo "pinard: warning: periodic 'engram sync --cloud' failed" >&2
+  done
+}
+
+# _run_with_engram_flush — run a command in the foreground; when it exits, fire a
+# final engram sync to drain any writes made in the last interval. Used instead of
+# `exec` for the pi launch so we can flush on agent exit.
+_run_with_engram_flush() {
+  "$@"
+  local _exit=$?
+  if [[ "$_ENGRAM_CLOUD_ACTIVE" == 1 && -n "$ENGRAM_PROJECT" ]]; then
+    engram sync --cloud --project "$ENGRAM_PROJECT" >/dev/null 2>&1 \
+      || echo "pinard: warning: exit 'engram sync --cloud' failed" >&2
+  fi
+  return $_exit
+}
+
+# _wait_for_engram — the engram serve MUST be healthy before launching pi;
+# otherwise mem_* is silently dead. Gates both vignoble (daemon-owned) and
+# standalone (self-started above) paths. ENGRAM_URL is always set by now for
+# both paths; it is only absent when neither a vignoble nor a standalone name
+# was provided (edge case: plain fzf-picker launch with no vignoble found yet).
+# Note: this gates only the LOCAL serve; cloud sync being down is non-fatal
+# (local store is the source of truth).
+_wait_for_engram() {
+  [[ -z "${ENGRAM_URL:-}" ]] && return 0
+  local deadline=$(( $(date +%s) + 15 )) ok=0
+  while [[ $(date +%s) -lt $deadline ]]; do
+    if curl -sf --connect-timeout 0.5 "${ENGRAM_URL}/health" -o /dev/null 2>/dev/null; then
+      ok=1; break
+    fi
+    sleep 0.3
+  done
+  if [[ $ok -eq 0 ]]; then
+    echo "pinard: FATAL: engram serve at ${ENGRAM_URL} is not healthy — refusing to start with broken memory." >&2
+    if [[ -n "$STANDALONE" ]]; then
+      echo "  Standalone worker: engram serve was started but did not become healthy in time." >&2
+      echo "  Check that the engram binary works: engram serve --port ${ENGRAM_PORT}" >&2
+    else
+      echo "  The per-vignoble serve is owned by 'aoc daemon'. Check it is running:" >&2
+      echo "    cd \"${VIGNOBLE:-.}\" && aoc daemon status   # then: aoc daemon start" >&2
+    fi
+    exit 1
+  fi
+  return 0
+}
+
+PINARD_REPO="$PINARD_HOME"
+export NATS_VIGNOBLE="$VIGNOBLE_NAME"
+
+# Engram memory tools — available to all agent roles (conductor, maître, vendangeur).
+# Defined early so the worker launch block can reference it in --tools.
+_ENGRAM_TOOLS="mem_search,mem_save,mem_context,mem_current_project,mem_get_observation,mem_update,mem_compare,mem_judge,mem_doctor,mem_capture_passive,mem_save_prompt,mem_session_start,mem_session_end,mem_session_summary,mem_suggest_topic_key"
+
+# ── Model resolution ─────────────────────────────────────────
+# Resolve a tier (sonnet/opus/haiku) or model ID to the concrete model ID from
+# ~/.claude/settings.json (delegated to `aoc resolve-model`, which strips the
+# [Nm] thinking suffix — the proxy handles thinking config separately).
+_resolve_model() {
+  aoc resolve-model "$1" 2>/dev/null
+}
+
+# ── Worker mode ───────────────────────────────────────────────
+# Workers stay in their spawn_dir (project repo or worktree).
+# Do NOT cd to VIGNOBLE — that would lose the project cwd.
+if [[ "${1:-}" == "--worker" ]]; then
+  shift
+  # Security: the owner PAT must never reach a vendangeur. Unset it immediately
+  # (belt-and-suspenders — env-exports no longer emits it by default, but guard
+  # against it leaking via any other path, e.g. --containall env inheritance).
+  unset PINARD_OWNER_GITLAB_TOKEN
+  WORKER_PROJECT=""
+  WORKER_PROMPT=""
+  WORKER_SESSION=""
+  WORKER_TARGET_BRANCH="main"
+  WORKER_MODEL=""
+  WORKER_PROCESS=""
+  WORKER_ARGS=""
+  WORKER_PARCELLE=""
+  WORKER_ISSUE=""
+  WORKER_RUN_ID=""
+  WORKER_REPO=""        # standalone mode: repo path for vignoble-free vigne-args
+  WORKER_RUNS_DIR=""    # explicit babysitter runs base (persistent, survives restarts)
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) WORKER_PROJECT="$2"; shift 2 ;;
+      --prompt) WORKER_PROMPT="$2"; shift 2 ;;
+      --session-name) WORKER_SESSION="$2"; shift 2 ;;
+      --target-branch) WORKER_TARGET_BRANCH="$2"; shift 2 ;;
+      --model) WORKER_MODEL="$2"; shift 2 ;;
+      --process) WORKER_PROCESS="$2"; shift 2 ;;
+      --run-id) WORKER_RUN_ID="$2"; shift 2 ;;
+      --args) WORKER_ARGS="$2"; shift 2 ;;
+      --parcelle) WORKER_PARCELLE="$2"; shift 2 ;;
+      --issue) WORKER_ISSUE="$2"; shift 2 ;;
+      --vignoble-name) shift 2 ;;   # already consumed above (sets STANDALONE)
+      --repo) WORKER_REPO="$2"; shift 2 ;;
+      --runs-dir) WORKER_RUNS_DIR="$2"; shift 2 ;;
+      *) WORKER_PROMPT="$1"; shift ;;
+    esac
+  done
+
+  # A process worker can run without an explicit prompt (the process drives it).
+  # Use the same no-op governance prompt as `aoc spawn` so the bootstrap turn
+  # only produces "ready" instead of free-roaming. `aoc governance-prompt` is
+  # the single source of truth for this text — both paths stay in sync.
+  if [[ -z "$WORKER_PROMPT" && -n "$WORKER_PROCESS" ]]; then
+    WORKER_PROMPT="$(aoc governance-prompt --process "$WORKER_PROCESS" 2>/dev/null)" || true
+    if [[ -z "$WORKER_PROMPT" ]]; then
+      WORKER_PROMPT="Process: $WORKER_PROCESS"
+    fi
+  fi
+
+  if [[ -z "$WORKER_PROJECT" || -z "$WORKER_PROMPT" ]]; then
+    echo "Usage: pinard --worker --project <name> (--prompt <task> | --process <name>) [--session-name <name>] [--target-branch <branch>] [--args <json>]" >&2
+    echo "       standalone (no vignoble dir): add --vignoble-name <name> --model <id> [--repo <group/proj>]" >&2
+    exit 1
+  fi
+
+  # Standalone (remote) worker: require an explicit concrete model — model
+  # resolution (aoc resolve-model) needs the vignoble we don't have here.
+  if [[ -n "$STANDALONE" && -z "$WORKER_MODEL" ]]; then
+    echo "Error: standalone worker requires --model <concrete-id> (e.g. claude-sonnet-4-6)" >&2
+    exit 1
+  fi
+
+  export WORKER_SESSION="${WORKER_SESSION:-$WORKER_PROJECT-$$}"
+  export WORKER_PROJECT
+  export PINARD_REPO
+  export PI_PERMISSION_SYSTEM_POLICY_AGENT_DIR="$HOME/.pi/agent/worker-policy"
+
+  # Parcelle: defaults to the project. Exported for ALL workers (process-governed
+  # or plain) so the worker extension builds parcelle-scoped NATS subjects
+  # (pinard.<v>.parcelles.<parcelle>.agents.<id>...). Agent subjects are always
+  # parcelle-scoped, so this must be set regardless of --process.
+  WORKER_PARCELLE="${WORKER_PARCELLE:-$WORKER_PROJECT}"
+  export BABYSITTER_PARCELLE="$WORKER_PARCELLE"
+
+  # Babysitter process support
+  if [[ -n "$WORKER_PROCESS" ]]; then
+    export BABYSITTER_PROCESS="$WORKER_PROCESS"
+    # Resolve process definition path (first match wins). A project can ship its own
+    # process alongside its runbook at <repo>/pinard/<name>/process.js — preferred so
+    # project-specific automation lives with the project, not in the pinard repo.
+    #
+    # PINARD_PROCESS_FILE (if set to an existing file) is an explicit override that
+    # wins over the search — e.g. a process baked into a container image at a fixed
+    # path, or a dev copy to iterate on without touching the repo checkout. If it is
+    # unset or points at a missing file, resolution falls through to the search below.
+    BABYSITTER_PROCESS_PATH=""
+    for candidate in \
+      ${PINARD_PROCESS_FILE:+"$PINARD_PROCESS_FILE"} \
+      "$(pwd)/pinard/${WORKER_PROCESS}/process.js" \
+      "$VIGNOBLE/vignes/$WORKER_PROJECT/pinard/${WORKER_PROCESS}/process.js" \
+      "$VIGNOBLE/vignes/$WORKER_PROJECT/processes/${WORKER_PROCESS}.js" \
+      "$(pwd)/processes/${WORKER_PROCESS}.js" \
+      "$PINARD_REPO/processes/${WORKER_PROCESS}.js"; do
+      if [[ -f "$candidate" ]]; then
+        BABYSITTER_PROCESS_PATH="$(readlink -f "$candidate")"
+        break
+      fi
+    done
+    if [[ -z "$BABYSITTER_PROCESS_PATH" ]]; then
+      echo "Error: process definition '${WORKER_PROCESS}' not found. Searched:" >&2
+      echo "  $(pwd)/pinard/${WORKER_PROCESS}/process.js" >&2
+      echo "  $VIGNOBLE/vignes/$WORKER_PROJECT/pinard/${WORKER_PROCESS}/process.js" >&2
+      echo "  $VIGNOBLE/vignes/$WORKER_PROJECT/processes/${WORKER_PROCESS}.js" >&2
+      echo "  $(pwd)/processes/${WORKER_PROCESS}.js" >&2
+      echo "  $PINARD_REPO/processes/${WORKER_PROCESS}.js" >&2
+      exit 1
+    fi
+    export BABYSITTER_PROCESS_PATH
+    echo "[pinard] process '${WORKER_PROCESS}' -> ${BABYSITTER_PROCESS_PATH}${PINARD_PROCESS_FILE:+ (PINARD_PROCESS_FILE override)}" >&2
+
+    # Make @a5c-ai/babysitter-sdk resolvable from a PROJECT-hosted process.js. Node
+    # walks up from the process file for node_modules/@a5c-ai/babysitter-sdk; a
+    # process living in a project repo (outside the pinard tree) won't find the
+    # bundled SDK. Drop the same symlink pinard uses for itself, pointing at the SDK
+    # in $PINARD_REPO (valid both locally and inside the container image). The project
+    # repo should gitignore node_modules. Skipped for pinard-hosted processes (already
+    # resolvable, and $PINARD_REPO is read-only in the image).
+    _sdk_src="$PINARD_REPO/deps/babysitter/packages/sdk"
+    _proc_dir="$(dirname "$BABYSITTER_PROCESS_PATH")"
+    case "$_proc_dir/" in
+      "$PINARD_REPO"/*) : ;;
+      *)
+        if [[ -d "$_sdk_src" && ! -e "$_proc_dir/node_modules/@a5c-ai/babysitter-sdk" ]]; then
+          _sdk_err="$({ mkdir -p "$_proc_dir/node_modules/@a5c-ai" \
+            && ln -sfn "$_sdk_src" "$_proc_dir/node_modules/@a5c-ai/babysitter-sdk"; } 2>&1)" || true
+          if [[ ! -e "$_proc_dir/node_modules/@a5c-ai/babysitter-sdk" ]]; then
+            echo "[pinard] WARN: cannot create @a5c-ai/babysitter-sdk symlink in $_proc_dir (not writable)." >&2
+            [[ -n "$_sdk_err" ]] && echo "  Error: $_sdk_err" >&2
+            echo "  The process import of @a5c-ai/babysitter-sdk will fail unless the symlink already" >&2
+            echo "  exists elsewhere on Node's resolution path. If this dir is baked into a read-only" >&2
+            echo "  image, create the symlink at build time:" >&2
+            echo "    ln -sfn $_sdk_src $_proc_dir/node_modules/@a5c-ai/babysitter-sdk" >&2
+          fi
+        fi
+        ;;
+    esac
+
+    # (Parcelle already resolved + exported above for all workers.)
+
+    # Runs directory. Babysitter resumes a run from <runs-dir>/<RUN_ID>/run.json,
+    # so this must be persistent and the SAME path across restarts. An explicit
+    # --runs-dir wins (the robust choice for a remote worker — env vars don't cross
+    # `singularity --containall`, but args do; point it at a bound, persistent path).
+    # Otherwise: vignoble/parcelles/<parcelle>/runs (normal) or a local dir
+    # (standalone). The daemon's orphan-recovery is filesystem-bound to the vignoble
+    # host and does not manage remote runs.
+    if [[ -n "$WORKER_RUNS_DIR" ]]; then
+      _runs_base="$WORKER_RUNS_DIR/$WORKER_PARCELLE"
+    elif [[ -n "$STANDALONE" ]]; then
+      _runs_base="${PINARD_RUNS_DIR:-$(pwd)/.pinard/parcelles/$WORKER_PARCELLE}"
+    else
+      _runs_base="$VIGNOBLE/parcelles/$WORKER_PARCELLE"
+    fi
+    export BABYSITTER_RUNS_DIR="$_runs_base/runs"
+    mkdir -p "$BABYSITTER_RUNS_DIR"
+
+    # Auto-create parcelle.yaml if missing
+    _parcelle_yaml="$_runs_base/parcelle.yaml"
+    if [[ ! -f "$_parcelle_yaml" ]]; then
+      mkdir -p "$_runs_base"
+      cat > "$_parcelle_yaml" <<YAML
+name: $WORKER_PARCELLE
+status: active
+created: $(date -u +%Y-%m-%d)
+issues: []
+YAML
+    fi
+
+    # Run ID determines the run dir, hence resume. Precedence:
+    # explicit --run-id > issue-driven > (standalone: stable project-process) >
+    # session-based. NOTE: the session-based default is PID-derived and therefore
+    # NOT stable across restarts — fine for vignoble workers (the daemon passes a
+    # stable --run-id), but a standalone worker must get a stable id so re-running
+    # resumes the same babysitter run instead of starting fresh.
+    if [[ -n "$WORKER_RUN_ID" ]]; then
+      export BABYSITTER_RUN_ID="$WORKER_RUN_ID"
+    elif [[ -n "$WORKER_ISSUE" ]]; then
+      export BABYSITTER_RUN_ID="${WORKER_PROJECT}-${WORKER_PROCESS}-${WORKER_ISSUE}"
+    elif [[ -n "$STANDALONE" ]]; then
+      export BABYSITTER_RUN_ID="${WORKER_PROJECT}-${WORKER_PROCESS}"
+    else
+      export BABYSITTER_RUN_ID="${WORKER_PROJECT}-${WORKER_PROCESS}-${WORKER_SESSION}"
+    fi
+    # Build default process args from project context if not provided.
+    # `aoc vigne-args` reads vignes.yaml (via AOC_CONFIG) and emits the JSON; in
+    # standalone mode pass --repo so it builds the JSON from flags alone (no vignoble).
+    if [[ -z "$WORKER_ARGS" ]]; then
+      _repo_arg=()
+      [[ -n "$STANDALONE" ]] && _repo_arg=(--repo "$WORKER_REPO")
+      WORKER_ARGS="$(aoc vigne-args \
+        --project "$WORKER_PROJECT" \
+        --session "$WORKER_SESSION" \
+        --target-branch "$WORKER_TARGET_BRANCH" \
+        --issue "$WORKER_ISSUE" \
+        --parcelle "${BABYSITTER_PARCELLE:-}" \
+        --run-id "${BABYSITTER_RUN_ID:-}" \
+        --reviewer "${PINARD_REVIEWER:-}" \
+        --assignee "${PINARD_GITLAB_USER:-}" \
+        "${_repo_arg[@]}" 2>/dev/null)"
+    fi
+  fi
+  [[ -n "$WORKER_ARGS" ]] && export BABYSITTER_ARGS="$WORKER_ARGS"
+
+  CONTEXT_ARGS=()
+  # Load VIGNE.md for this project if it exists (no vignoble in standalone mode).
+  if [[ -z "$STANDALONE" && -f "$VIGNOBLE/vignes/$WORKER_PROJECT/VIGNE.md" ]]; then
+    CONTEXT_ARGS+=(--append-system-prompt "@$VIGNOBLE/vignes/$WORKER_PROJECT/VIGNE.md")
+  fi
+
+  # Resolve worker model. Standalone requires a concrete --model (used as-is, since
+  # aoc resolve-model needs the vignoble). Otherwise an explicit --model wins
+  # (accept tier or full ID); else `aoc resolve-model --role worker` derives it.
+  if [[ -n "$STANDALONE" ]]; then
+    : # WORKER_MODEL already a concrete id (validated above)
+  elif [[ -z "$WORKER_MODEL" ]]; then
+    WORKER_MODEL="$(aoc resolve-model --role worker --project "$WORKER_PROJECT" 2>/dev/null)"
+  else
+    WORKER_MODEL="$(_resolve_model "$WORKER_MODEL")"
+  fi
+  export ANTHROPIC_MODEL="$WORKER_MODEL"
+
+  # Web-terminal responder: make this standalone/HPC vendangeur's tmux session
+  # viewable through the gateway over NATS. Only start one when this host does NOT
+  # already serve a responder for the vignoble — the daemon runs an in-process
+  # responder for its vignoble, and multiple responders on one host cause duplicate
+  # tmux attaches and reply races (a stale one can surface a spurious
+  # "unauthorized"). So: skip if any local `aoc daemon` is running (daemon host) or
+  # a responder for this vignoble is already up; start only on a true remote/HPC
+  # node (no daemon). Backgrounded; self-exits if webterm isn't configured.
+  if command -v aoc &>/dev/null; then
+    if pgrep -f "aoc daemon" >/dev/null 2>&1; then
+      : # a daemon on this host already serves the responder — don't duplicate
+    elif pgrep -f "aoc webterm-responder --vignoble-name $VIGNOBLE_NAME" >/dev/null 2>&1; then
+      : # a responder for this vignoble is already running
+    else
+      _wt_log="${BABYSITTER_RUNS_DIR:-/tmp}/webterm-responder.log"
+      ( aoc webterm-responder --vignoble-name "$VIGNOBLE_NAME" >>"$_wt_log" 2>&1 & ) || true
+    fi
+  fi
+
+  # Role-scoped engram project for vendangeurs: bare vigne name (same repo = same
+  # memory across vignobles). Enroll + drain for this project if cloud is active.
+  export ENGRAM_PROJECT="$WORKER_PROJECT"
+  if [[ "$_ENGRAM_CLOUD_ACTIVE" == 1 ]]; then
+    engram cloud enroll "$ENGRAM_PROJECT" >/dev/null 2>&1 \
+      || echo "pinard: warning: 'engram cloud enroll $ENGRAM_PROJECT' failed — project may not sync" >&2
+    engram sync --cloud --project "$ENGRAM_PROJECT" >/dev/null 2>&1 \
+      || echo "pinard: warning: worker startup 'engram sync --cloud' failed — backlog will retry via autosync" >&2
+  fi
+
+  # Periodic engram cloud sync (non-fatal background loop, self-exits with parent).
+  [[ "$_ENGRAM_CLOUD_ACTIVE" == 1 && -n "$STANDALONE" ]] && _engram_sync_loop $$ "$ENGRAM_PROJECT" &
+
+  # Persist the worker's pi session under the (bound) babysitter run dir so the
+  # transcript survives the --containall/--writable-tmpfs sandbox (default
+  # ~/.pi/agent is RAM) and can be inspected/resumed off-host. Same run id as the
+  # babysitter run, so a resumed run continues the same conversation.
+  _sess_args=()
+  if [[ -n "${BABYSITTER_RUNS_DIR:-}" && -n "${BABYSITTER_RUN_ID:-}" ]]; then
+    _sess_file="$BABYSITTER_RUNS_DIR/$BABYSITTER_RUN_ID/pi-session.jsonl"
+    if mkdir -p "$(dirname "$_sess_file")" 2>/dev/null; then
+      _sess_args=(--session "$_sess_file")
+      echo "[pinard] pi session: $_sess_file" >&2
+    fi
+  fi
+
+  _wait_for_engram
+  _run_with_engram_flush pi --provider proxy \
+    --models "proxy/$WORKER_MODEL" \
+    "${_sess_args[@]}" \
+    --extension "$PINARD_REPO/pi-extension/worker" \
+    --extension "$PINARD_REPO/pi-extension/babysitter" \
+    --tools "read,write,edit,bash,grep,find,ls,glob,aoc_notify,track_mr,read_issue,update_issue,${_ENGRAM_TOOLS}" \
+    --theme "$PINARD_REPO/themes/pinard.json" \
+    "${CONTEXT_ARGS[@]}" \
+    "$WORKER_PROMPT"
+  exit $?
+fi
+
+# ── Conductor / Maître launch (shared) ──────────────────────
+
+cd "$VIGNOBLE"
+
+# Emit conductor-only credentials (e.g. PINARD_OWNER_GITLAB_TOKEN). These are
+# intentionally withheld from workers by env-exports default and unset above.
+if command -v aoc &>/dev/null; then
+  eval "$(aoc env-exports --role conductor)"
+fi
+
+# Warn early (once, before pi starts) when PINARD_OWNER_GITLAB_TOKEN is missing.
+# Without it, spawn_agent falls back to the bot token → the daemon's owner-gate
+# holds the issue in awaiting-approval with no hint why. Print regardless of
+# whether we're launching a régisseur or a maître (both are conductor-grade).
+if [[ -z "${PINARD_OWNER_GITLAB_TOKEN:-}" ]]; then
+  echo "pinard: warning: PINARD_OWNER_GITLAB_TOKEN not set — issue assignments will be attributed to the bot and HELD for manual approval. Set gitlab.owner_token_env + the PAT (api scope) to auto-approve régisseur-initiated spawns." >&2
+fi
+
+# Shared context args: PINARD.md (vignoble-local overrides global), vignes.yaml,
+# optional VIGNOBLE.md, and per-vigne VIGNE.md.
+_build_context_args() {
+  CONTEXT_ARGS=()
+  if [[ -f "$VIGNOBLE/PINARD.md" ]] && [[ ! -L "$VIGNOBLE/PINARD.md" || "$(readlink -f "$VIGNOBLE/PINARD.md")" != "$PINARD_REPO/PINARD.md" ]]; then
+    CONTEXT_ARGS+=(--append-system-prompt "@$VIGNOBLE/PINARD.md")
+  else
+    CONTEXT_ARGS+=(--append-system-prompt "@$PINARD_REPO/PINARD.md")
+  fi
+  [[ -f vignes.yaml ]] && CONTEXT_ARGS+=(--append-system-prompt "@vignes.yaml")
+  [[ -f "$VIGNOBLE/VIGNOBLE.md" ]] && CONTEXT_ARGS+=(--append-system-prompt "@$VIGNOBLE/VIGNOBLE.md")
+  if [[ -d "$VIGNOBLE/vignes" ]]; then
+    for vigne_md in "$VIGNOBLE/vignes/"*/VIGNE.md; do
+      [[ -f "$vigne_md" ]] && CONTEXT_ARGS+=(--append-system-prompt "@$vigne_md")
+    done
+  fi
+}
+
+# Shared conductor/maître tool set (dashboard and maîtres run the same
+# extension + tools; the maître is just scoped to one parcelle via env).
+# (_ENGRAM_TOOLS is defined above, shared with workers.)
+# pi-sessions was dropped (it forced node >=24; cross-session recall is covered by
+# engram). No session_search/session_ask/session_handoff tools.
+_PINARD_TOOLS="read,write,edit,grep,find,ls,glob,bash,send_message,spawn_agent,create_cuvee,open_cuvee_mr,comment_mr,list_workers,list_parcelles,attach_parcelle,track_mr,kill_worker,interrupt_worker,read_issue,update_issue,get_notifications,get_watcher_logs,get_schedules,create_schedule,create_issue,link_issues,create_contract,get_agent_events,ack_event,update_config,${_ENGRAM_TOOLS}"
+
+# Resolve conductor-grade model (maîtres are conductor-grade too — not
+# downgraded) and the available --models list, both via aoc.
+CONDUCTOR_MODEL="$(aoc resolve-model --role conductor 2>/dev/null)"
+_MODELS_LIST="$(aoc resolve-model --models-list 2>/dev/null)"
+export ANTHROPIC_MODEL="$CONDUCTOR_MODEL"
+
+# Startup timing anchor (epoch ms just before launching pi). The extension logs
+# elapsed-since-this to logs/conductor.log to split pi-boot vs NATS-connect cost.
+export PINARD_LAUNCH_MS="$(date +%s%3N)"
+
+# Per-vignoble pi agent dir (conductors only). pi-sessions reads its index location
+# from GLOBAL settings only, so to keep the session index per-vignoble (like engram /
+# .state) we relocate pi's agent dir into the vignoble: symlink the shared global
+# config, then regenerate settings.json with a per-vignoble sessions.index.dir. The
+# global settings (picker shortcut, haiku model from ./install) are inherited via the
+# regen. Non-fatal — on any failure pi falls back to the default ~/.pi/agent.
+# NOTE: dst is .pi/pi-agent, NOT .pi/agent — the latter holds the conductor's
+# per-vignoble project permissions (pi-permissions.jsonc), which pi resolves from
+# cwd and must not be clobbered. Global policy is symlinked in below; project
+# policy stays in .pi/agent (cwd-resolved, unaffected by PI_CODING_AGENT_DIR).
+_pi_agent_src="$HOME/.pi/agent"
+if [[ -d "$_pi_agent_src" ]]; then
+  _pi_agent_dst="$VIGNOBLE/.pi/pi-agent"
+  mkdir -p "$_pi_agent_dst"
+  for _e in "$_pi_agent_src"/* "$_pi_agent_src"/.[!.]*; do
+    [[ -e "$_e" ]] || continue
+    [[ "$(basename "$_e")" == "settings.json" ]] && continue
+    ln -sfn "$_e" "$_pi_agent_dst/$(basename "$_e")"
+  done
+  if [[ -f "$_pi_agent_src/settings.json" ]] && node -e 'const fs=require("fs");const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));s.sessions=s.sessions||{};s.sessions.index={...(s.sessions.index||{}),dir:process.argv[2]};fs.writeFileSync(process.argv[3],JSON.stringify(s,null,2)+"\n")' "$_pi_agent_src/settings.json" "$VIGNOBLE/.pi/pi-sessions" "$_pi_agent_dst/settings.json" 2>/dev/null; then
+    export PI_CODING_AGENT_DIR="$_pi_agent_dst"
+  fi
+fi
+
+# ── Maître mode (per-parcelle scoped conductor) ─────────────
+# Runs inside a tmux window created by the spawner (aoc maitre spawn); it does
+# NOT bootstrap its own tmux session. Persistent, resumable session per parcelle:
+# `pi --session <parcelles/<name>/session.jsonl>` (resume-if-exists).
+if [[ -n "$MAITRE_PARCELLE" ]]; then
+  export PINARD_PARCELLE="$MAITRE_PARCELLE"
+  _sess_dir="$VIGNOBLE/parcelles/$MAITRE_PARCELLE"
+  mkdir -p "$_sess_dir"
+  _build_context_args
+  # Role-scoped engram project for maître: parcelle-<name>.
+  export ENGRAM_PROJECT="parcelle-$MAITRE_PARCELLE"
+  if [[ "$_ENGRAM_CLOUD_ACTIVE" == 1 ]]; then
+    engram cloud enroll "$ENGRAM_PROJECT" >/dev/null 2>&1 \
+      || echo "pinard: warning: 'engram cloud enroll $ENGRAM_PROJECT' failed — project may not sync" >&2
+    engram sync --cloud --project "$ENGRAM_PROJECT" >/dev/null 2>&1 \
+      || echo "pinard: warning: maître startup 'engram sync --cloud' failed — backlog will retry via autosync" >&2
+  fi
+  [[ "$_ENGRAM_CLOUD_ACTIVE" == 1 && -n "$STANDALONE" ]] && _engram_sync_loop $$ "$ENGRAM_PROJECT" &
+  _wait_for_engram
+  _run_with_engram_flush pi --provider proxy \
+    --models "$_MODELS_LIST" \
+    --extension "$PINARD_REPO/pi-extension/pinard" \
+    --session "$_sess_dir/session.jsonl" \
+    --tools "$_PINARD_TOOLS" \
+    --theme "$PINARD_REPO/themes/pinard.json" \
+    "${CONTEXT_ARGS[@]}"
+  exit $?
+fi
+
+# ── Régisseur mode (general lane) ─────────────────────────────
+
+PINARD_SOCKET="pinard-$VIGNOBLE_NAME"
+
+# If not already inside the pinard socket, bootstrap into it. The régisseur (the
+# estate manager — the general lane) is window 0, named "[régisseur]" (bracketed
+# so no parcelle maître window can collide); maîtres are added as sibling
+# windows by `aoc maitre spawn`. Keep this name in sync with session.RegisseurWindow.
+if [[ "${TMUX_PINARD_SOCKET:-}" != "$PINARD_SOCKET" ]]; then
+  if tmux -L "$PINARD_SOCKET" has-session -t conductor 2>/dev/null; then
+    exec tmux -L "$PINARD_SOCKET" attach -t conductor
+  else
+    # Start a new tmux server+session; re-exec pinard inside it to reach the pi launch below
+    self="$(readlink -f "$0")"
+    exec tmux -L "$PINARD_SOCKET" new-session -s conductor -n '[régisseur]' -c "$VIGNOBLE" \
+      "TMUX_PINARD_SOCKET='$PINARD_SOCKET' '$self' --vignoble '$VIGNOBLE'"
+  fi
+fi
+
+# Cosmetic: apply vineyard palette. Set the GLOBAL base status style to trellis
+# grey so the bar never falls back to tmux's default green; role tints layer on
+# top (burgundy régisseur tab, gold maître tabs, leaf-green vendangeur sessions).
+# These run once each time the régisseur launches (idempotent set-option).
+# Errors are silently ignored — purely cosmetic.
+tmux set-option -g status-style "bg=colour236,fg=colour231" 2>/dev/null || true
+tmux set-option -g status-left-style "bg=colour236,fg=colour231" 2>/dev/null || true
+tmux set-option -g status-right-style "bg=colour236,fg=colour231" 2>/dev/null || true
+# In this tmux `status-style` and the deprecated `status-bg`/`status-fg` are
+# decoupled: the EMPTY fill of the bar is drawn with status-bg, which setting
+# status-style does not update. Set them explicitly so the fill is grey, not the
+# tmux-default green. (Vendangeur sessions set their own green status-bg.)
+tmux set-option -g status-bg colour236 2>/dev/null || true
+tmux set-option -g status-fg colour231 2>/dev/null || true
+tmux set-option -t conductor status-style "bg=colour236,fg=colour231" 2>/dev/null || true
+tmux set-option -t conductor status-interval 15 2>/dev/null || true
+# Replace the redundant "[conductor]" session-name in status-left with the
+# vignoble label (matches the dashboard's "🍇 <name>").
+tmux set-option -t conductor status-left " 🍇 ${VIGNOBLE_NAME} " 2>/dev/null || true
+tmux set-option -t conductor status-left-length 16 2>/dev/null || true
+# Swap fg/bg between inactive and active (like the maître gold tabs) so the
+# selected state is visible: inactive = burgundy text on grey, active = white on
+# burgundy.
+tmux set-window-option -t "conductor:[régisseur]" window-status-style "fg=colour167,bg=colour236" 2>/dev/null || true
+tmux set-window-option -t "conductor:[régisseur]" window-status-current-style "fg=colour231,bg=colour88" 2>/dev/null || true
+# 🎩 emoji + window index on the régisseur tab (format keeps the burgundy style above).
+tmux set-window-option -t "conductor:[régisseur]" window-status-format " #I 🎩 #W " 2>/dev/null || true
+tmux set-window-option -t "conductor:[régisseur]" window-status-current-format " #I 🎩 #W " 2>/dev/null || true
+# status-right: just the vignoble clock. Vendangeur pills here were too noisy and
+# too wide (long session names overflowed into the maître tabs) — browse workers
+# via `ctrl+b f` (colored choose-tree) or the dashboard instead.
+tmux set-option -t conductor status-right "#[fg=colour231] ⚙ %H:%M " 2>/dev/null || true
+# Colored session/window pickers (ctrl+b s / w / f): tint each entry by role —
+# 🍷 conductor, 🎩 régisseur, 🧑‍🌾 maître, 🧺 vendangeur. `f` is rebound from
+# find-window to a colored choose-tree so the picker carries the palette too.
+_pinard_tree_fmt='#{?window_format,#{?#{!=:#{session_name},conductor},#[fg=colour22]🧺 ,#{?#{==:#{window_name},[régisseur]},#[fg=colour167]🎩 ,#[fg=colour136]🧑‍🌾 }}#[fg=colour231]#{window_name},#{?#{==:#{session_name},conductor},#[fg=colour231]🍷 ,#[fg=colour22]🧺 }#[fg=colour231]#{session_name}}'
+tmux bind-key s choose-tree -Zs -F "$_pinard_tree_fmt" 2>/dev/null || true
+tmux bind-key w choose-tree -Zw -F "$_pinard_tree_fmt" 2>/dev/null || true
+tmux bind-key f choose-tree -Zw -F "$_pinard_tree_fmt" 2>/dev/null || true
+tmux set-option -g mode-style "bg=colour242,fg=colour231" 2>/dev/null || true
+
+_build_context_args
+
+# Persist the régisseur's session so it resumes across restarts. Stored in
+# .state/ (NOT under parcelles/ — it is not a workstream), keeping the parcelles/
+# tree exclusively real parcelles.
+mkdir -p "$VIGNOBLE/.state"
+
+[[ "$_ENGRAM_CLOUD_ACTIVE" == 1 && -n "$STANDALONE" ]] && _engram_sync_loop $$ "$ENGRAM_PROJECT" &
+_wait_for_engram
+_run_with_engram_flush pi --provider proxy \
+  --models "$_MODELS_LIST" \
+  --extension "$PINARD_REPO/pi-extension/pinard" \
+  --session "$VIGNOBLE/.state/regisseur-session.jsonl" \
+  --tools "$_PINARD_TOOLS" \
+  --theme "$PINARD_REPO/themes/pinard.json" \
+  "${CONTEXT_ARGS[@]}" \
+  "$@"

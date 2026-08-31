@@ -1,0 +1,9 @@
+{
+  "providers": {
+    "proxy": {
+      "baseUrl": "https://your-llm-proxy.example.com/proxy",
+      "api": "anthropic-messages",
+      "authHeader": true
+    }
+  }
+}

@@ -1,0 +1,315 @@
+# Pinard platform — one chart, three components deployed as one HelmRelease:
+#   website  → the pinard image, `serve-site` command (static docs)
+#   webterm  → the pinard image, default command (web-terminal gateway)
+#   engram   → gp/engram image (upstream memory backend)
+# UAT values (registry, hosts, Vault/RDS/Cognito, image setters) live in custom-uat.yaml.
+
+global:
+  imagePullSecrets: []
+
+# ── website ─────────────────────────────────────
+website:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ""        # the pinard image (set in custom-<env>.yaml)
+    tag: ""
+    pullPolicy: IfNotPresent
+  # website runs the shared the pinard image in static-site mode.
+  command: ["webterm-gateway", "serve-site", "--dir", "/srv/site", "--addr", ":80"]
+  service:
+    type: ClusterIP
+    port: 80
+  ingressRoute:
+    enabled: false
+    host: ""
+    entryPoints: [web]
+    annotations: {}
+    middlewares: []
+    tls: {}
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── webterm-gateway ──────────────────────────────
+webterm:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ""        # the pinard image (same image as website)
+    tag: ""
+    pullPolicy: IfNotPresent
+  gateway:
+    listenPort: 8080
+    vignobles: []         # empty → serve KV-derived vignobles
+    vignoble: ""
+    baseUrl: ""
+    linkTTL: "5m"
+    idleTimeout: "15m"
+    maxViewers: 10
+    auth:
+      issuer: ""
+      clientId: ""
+      redirectUrl: ""
+      scopes: "openid email profile"
+      sessionTTL: "8h"
+  nats:
+    url: ""
+    user: ""
+  secrets:
+    # last-resort literals (preserved across upgrades via lookup) when vault is off
+    linkSecret: ""
+    grantSecret: ""
+    natsPassword: ""
+    cookieSecret: ""
+    vault:
+      enabled: false
+      secretStore: vault-cluster-store
+      refreshInterval: 1h
+      path: ""
+      linkSecretKey: webterm_link_secret
+      grantSecretKey: webterm_grant_secret
+      natsPasswordKey: nats_lelongs_passwd
+  service:
+    type: ClusterIP
+    port: 8080
+  ingressRoute:
+    enabled: false
+    host: ""
+    pathPrefix: /sessions
+    authCallbackPath: ""
+    entryPoints: [web]
+    annotations: {}
+    middlewares: []
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 300m, memory: 256Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── engram ───────────────────────────────────────
+engram:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ""        # gp/engram
+    tag: ""
+    pullPolicy: IfNotPresent
+  engram:
+    host: "0.0.0.0"
+    port: 7437
+    cloudToken: ""        # auto-generated into the Secret if empty (ignored when vault.enabled)
+    jwtSecret: ""         # auto-generated into the Secret if empty (ignored when vault.enabled)
+    allowedProjects: []   # empty → "*"
+    command: []
+    args: []
+    extraEnv: []
+  vault:
+    # When enabled, cloud-token and jwt-secret are sourced from Vault via ESO.
+    # Prerequisite: the Vault secret at `path` must contain properties
+    # `tokenKey` (= the canonical ENGRAM_CLOUD_TOKEN that clients present via
+    # credentials.yaml `engram.cloud_token`) and `jwtSecretKey`.
+    # Without these keys the ExternalSecret sync will fail and 401s will persist.
+    enabled: false
+    secretStore: vault-cluster-store
+    refreshInterval: 1h
+    path: ""              # e.g. huge/pinard
+    tokenKey: engram_cloud_token   # Vault property name for ENGRAM_CLOUD_TOKEN
+    jwtSecretKey: engram_jwt_secret  # Vault property name for ENGRAM_JWT_SECRET
+  service:
+    type: ClusterIP
+    port: 7437
+  ingressRoute:
+    enabled: false
+    host: ""
+    entryPoints: [web]
+    annotations: {}
+    middlewares: []
+    tls: {}
+  # In-chart Postgres (dev). UAT sets postgres.enabled=false + externalDatabase (RDS).
+  postgres:
+    enabled: true
+    image:
+      repository: postgres
+      tag: "16-alpine"
+      pullPolicy: IfNotPresent
+    database: engram
+    username: engram
+    password: ""
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 1Gi }
+  externalDatabase:
+    existingSecret: ""     # e.g. pinard-engram-db
+    urlKey: database-url
+    vault:
+      enabled: false
+      secretStore: vault-cluster-store
+      refreshInterval: 1h
+      path: ""
+      passwordKey: engram_rds_passwd
+      host: ""
+      port: 5432
+      database: engram
+      username: engram
+      sslmode: require
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── surrealdb ─────────────────────────────────────────────────────────
+surrealdb:
+  enabled: true
+  image:
+    repository: ""        # common-cache/surrealdb/surrealdb (set in custom-<env>.yaml)
+    tag: "3.2.0"
+    pullPolicy: IfNotPresent
+  # 3.2.0 spec: binary entrypoint is /surreal, not surreal
+  command: ["/surreal", "start"]
+  surrealdb:
+    bind: "0.0.0.0:8000"
+    rootUser: "root"
+    # datastore: surrealkv:// (file-backed, single node)
+    dataPath: "/data/surreal.db"
+    extraArgs: []
+    extraEnv: []
+  podSecurityContext:
+    fsGroup: 65532
+    runAsUser: 65532
+    runAsGroup: 65532
+    runAsNonRoot: true
+  vault:
+    enabled: false
+    secretStore: vault-cluster-store
+    refreshInterval: 1h
+    path: ""              # e.g. huge/pinard
+    passwdKey: surrealdb_root_passwd
+  service:
+    type: ClusterIP
+    port: 8000
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: "gp2"
+    # existingClaim: bind to a pre-created PVC (e.g. a static EBS Retain PV/PVC
+    # from pinard-infra app-bootstrap) instead of dynamically provisioning.
+    existingClaim: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "2", memory: 2Gi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── memory ingester ─────────────────────────────────────────────────
+memory:
+  enabled: true
+  image:
+    repository: ""        # the pinard image (set in custom-<env>.yaml)
+    tag: ""
+    pullPolicy: IfNotPresent
+  command: ["python", "-m", "services.memory.ingester"]
+  # ssh: bot SSH key for git access to wiki repos. Pulled from Vault via ExternalSecret.
+  # sshKey: Vault property name for the private key (mounted at /secrets/ssh/<sshKey>).
+  ssh:
+    vault:
+      sshKey: ""          # e.g. ssh_github_com; empty → no SSH ExternalSecret/mount
+  # wikiRepos: git repos to clone via the dynamic init-container.
+  # pinardWiki: SSH URL for the global pinard-wiki repo → /data/repos/pinard-wiki/.
+  # cloneDir: parent dir for clones inside the pod.
+  # Vignoble repos are discovered dynamically via NATS KV pinard-vignobles
+  # → /data/repos/vignobles/vignoble-<name>/ (no static config needed).
+  wikiRepos:
+    pinardWiki: ""        # e.g. git@github.com:your-org/pinard-wiki.git
+    cloneDir: /data/repos
+    sshHost: ""           # SSH hostname for vignoble git clones (sets GITLAB_SSH_HOST); must be set explicitly in custom-<env>.yaml
+    sshKnownHosts: ""     # known_hosts entry for sshHost (e.g. "ssh.gitlab.example.com ssh-ed25519 AAAA..."); required when sshHost is set
+    gitEmail: "pinard@example.com"  # git author/committer email for wiki clone jobs
+  # vignes: mount vignes.yaml into the pod so ScopeRollupEngine knows vigne membership.
+  # Superseded by wikiRepos.vignoble clone when that is set (VIGNOBLE_DIR points to clone).
+  # Set data to the raw vignes.yaml content; mountPath defaults to /etc/pinard.
+  vignes:
+    data: ""              # raw vignes.yaml content; empty → no ConfigMap/mount
+    mountPath: /etc/pinard
+  config:
+    surrealUser: "root"
+    engramUrl: ""
+    rosettaUrl: "https://embeddings.example.com"
+    natsUrl: ""
+    natsUser: ""
+    natsVignoble: ""
+    workerGroupId: "pinard"
+    llmApi: "openai-chat"
+    llmAuth: "google-sa"
+    llmModel: "google/gemini-3.1-flash-lite"
+    llmBaseUrl: "https://aiplatform.googleapis.com/v1beta1/projects/gcp-p-germline-ovf6s/locations/global/endpoints/openapi"
+    # Engram source: 'http' (local dev, default) or 'postgres' (EKS cloud RDS direct read)
+    engramSource: "http"
+    # Parent dir of vignoble clones (e.g. /data/repos/vignobles). Required in production;
+    # empty here so local dev can opt out. Set explicitly in custom-<env>.yaml.
+    vignobleBaseDir: ""
+    # Corporate CA bundle — baked into the base image; httpx and requests honour these env vars
+    sslCertFile: "/etc/ssl/certs/ca-certificates.crt"
+    requestsCaBundle: "/etc/ssl/certs/ca-certificates.crt"
+  vault:
+    enabled: false
+    secretStore: vault-cluster-store
+    refreshInterval: 1h
+    path: ""              # e.g. huge/pinard
+    passwdKey: surrealdb_root_passwd
+    geminiSaKey: gemini_sa_json
+    natsPasswordKey: ""  # e.g. nats_lelongs_passwd; set to add creds to NATS_URL
+    engramRoDsnKey: ""   # e.g. engram_ro_dsn; set to inject ENGRAM_PG_DSN from Vault
+    sshKey: ""           # e.g. ssh_github_com; overrides memory.ssh.vault.sshKey when set
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── graphiti (Phase-2, disabled) ────────────────────────────────────
+graphiti:
+  enabled: false
+  falkordb:
+    image:
+      repository: falkordb/falkordb
+      tag: "4.0.10"
+      pullPolicy: IfNotPresent
+    port: 6379
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 1Gi }
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""
+  graphiti:
+    image:
+      repository: ""      # the pinard image (set in custom-<env>.yaml)
+      tag: ""
+      pullPolicy: IfNotPresent
+    natsUrl: "nats://pinard-nats:4222"
+    extractionModel: "claude-haiku-4-5-20251001"
+    tokenUrl: ""
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 512Mi }
+    extraEnv: []
+  service:
+    type: ClusterIP
+    falkordbPort: 6379
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

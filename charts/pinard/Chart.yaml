@@ -1,0 +1,6 @@
+apiVersion: v2
+name: pinard
+description: Pinard platform — website, webterm-gateway, and engram in one chart (one HelmRelease)
+type: application
+version: 0.42.0
+appVersion: "0.1.0"

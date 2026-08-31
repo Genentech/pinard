@@ -1,0 +1,37 @@
+# pinard memory layer — Python service dependencies
+
+# Core
+pydantic>=2.0
+httpx>=0.25
+
+# Ontology (pip install -e packages/pinard-core for in-repo dev; image installs
+# it locally. Published wheel shares the pinard image version, so left unpinned.)
+pinard-core
+
+# SurrealDB HTTP client + embedded engine (surrealkv://)
+surrealdb>=2.0.0
+
+# NATS client (ingester + consumer)
+nats-py>=2.0
+
+# Postgres reader for Engram cloud RDS (MEMORY_ENGRAM_SOURCE=postgres, EKS path)
+psycopg[binary]>=3.1
+
+# Graphiti eval sidecar (EVAL-ONLY — time-boxed, amendment-01 Decision A2)
+graphiti-core>=0.29
+
+# LLM client (teaching-episode extraction + token management)
+# anthropic-messages adapter
+anthropic>=0.30
+# openai-chat adapter (Vertex OpenAI-compat, Gemini, etc.)
+openai>=1.0
+# google-sa auth provider (service-account credentials for Gemini)
+google-auth>=2.0
+
+# Scope roll-up & promotion bridge
+watchdog>=3.0
+pyyaml>=6.0
+
+# Testing
+pytest>=7.0
+pytest-asyncio>=0.23

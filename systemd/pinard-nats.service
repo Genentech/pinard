@@ -1,0 +1,12 @@
+[Unit]
+Description=NATS server for Pinard agent orchestration
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/nats-server -c %h/.config/nats/pinard.conf
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

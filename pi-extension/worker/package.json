@@ -1,0 +1,12 @@
+{
+  "name": "pinard-worker",
+  "version": "0.1.0",
+  "description": "Pi extension for Pinard worker agents — handles NATS inbox, event publishing, and credential refresh",
+  "main": "index.ts",
+  "dependencies": {
+    "@nats-io/jetstream": "^3.4.0",
+    "@nats-io/kv": "^3.4.0",
+    "@nats-io/transport-node": "^3.4.0",
+    "ws": "^8.18.0"
+  }
+}

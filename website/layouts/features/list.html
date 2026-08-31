@@ -1,0 +1,28 @@
+{{ define "main" }}
+<nav class="nav scrolled" id="main-nav">
+  <a class="nav-logo" href="/">Pin<span>ard</span></a>
+  <ul class="nav-links">
+    <li><a href="/#the-estate">The Estate</a></li>
+    <li><a href="/#features">The Cellar</a></li>
+    <li><a href="/docs/">The Craft</a></li>
+  </ul>
+  <a class="nav-cta" href="https://github.com/Genentech/pinard">GitHub →</a>
+</nav>
+<section style="padding: 10rem 2.5rem 6rem; max-width: 860px; margin: 0 auto; background: var(--charcoal); min-height: 100vh;">
+  <h1 style="font-family: var(--serif); color: var(--cream); font-size: 2.5rem; margin-bottom: 0.5rem;">The Cellar</h1>
+  <p style="color: rgba(245,240,232,0.6); margin-bottom: 3rem;">What's in the bottle.</p>
+  {{ range .Pages }}
+  <a href="{{ .RelPermalink }}" style="display:block; padding: 1.5rem 0; border-bottom: 1px solid rgba(196,168,130,0.15); text-decoration: none;">
+    <div style="font-family: var(--serif); font-size: 1.2rem; color: var(--cream); margin-bottom: 0.25rem;">{{ .Title }}</div>
+    <div style="font-size: 0.85rem; color: rgba(245,240,232,0.55);">{{ .Params.summary }}</div>
+  </a>
+  {{ end }}
+</section>
+<footer class="footer">
+  <div class="footer-logo">Pin<span>ard</span></div>
+  <ul class="footer-links">
+    <li><a href="https://github.com/Genentech/pinard">GitHub</a></li>
+    <li><a href="/docs/">The Craft</a></li>
+  </ul>
+</footer>
+{{ end }}

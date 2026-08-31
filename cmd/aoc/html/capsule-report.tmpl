@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Capsule Result — {{.Contract.Description}}</title>
+<style>
+  :root {
+    --burgundy: #6b2737;
+    --gold:     #c9a84c;
+    --cream:    #faf7f2;
+    --stone:    #e8e0d0;
+    --text:     #2c2c2c;
+    --muted:    #6b6b6b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Georgia', 'Times New Roman', serif;
+    background: var(--cream);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 2rem 1rem;
+  }
+  .page { max-width: 800px; margin: 0 auto; }
+  header {
+    border-bottom: 3px solid var(--burgundy);
+    padding-bottom: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  header .label {
+    font-size: 0.75rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.4rem;
+  }
+  header h1 {
+    font-size: 1.6rem;
+    font-weight: normal;
+    color: var(--burgundy);
+    margin-bottom: 0.5rem;
+  }
+  header .meta {
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  header .meta a { color: var(--burgundy); text-decoration: none; }
+  header .meta a:hover { text-decoration: underline; }
+  .stats-card {
+    background: white;
+    border: 1px solid var(--stone);
+    border-left: 4px solid var(--gold);
+    border-radius: 4px;
+    padding: 1.2rem 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .stats-card h2 {
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.8rem;
+  }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 1rem;
+  }
+  .stat { text-align: center; }
+  .stat .value { font-size: 1.4rem; color: var(--burgundy); font-weight: bold; }
+  .stat .key { font-size: 0.75rem; color: var(--muted); margin-top: 0.1rem; }
+  .links-bar {
+    display: flex; flex-wrap: wrap; gap: 0.6rem;
+    margin-bottom: 2rem;
+  }
+  .links-bar a {
+    background: var(--burgundy);
+    color: white;
+    text-decoration: none;
+    padding: 0.35rem 0.9rem;
+    border-radius: 3px;
+    font-size: 0.82rem;
+    font-family: sans-serif;
+  }
+  .links-bar a:hover { background: #4e1c28; }
+  .report-body {
+    background: white;
+    border: 1px solid var(--stone);
+    border-radius: 4px;
+    padding: 2rem;
+  }
+  .report-body h1, .report-body h2, .report-body h3 {
+    color: var(--burgundy);
+    margin-top: 1.5rem;
+    margin-bottom: 0.6rem;
+    font-weight: normal;
+  }
+  .report-body h1 { font-size: 1.4rem; }
+  .report-body h2 { font-size: 1.15rem; border-bottom: 1px solid var(--stone); padding-bottom: 0.3rem; }
+  .report-body h3 { font-size: 1rem; }
+  .report-body p { margin-bottom: 0.9rem; }
+  .report-body ul, .report-body ol { padding-left: 1.5rem; margin-bottom: 0.9rem; }
+  .report-body li { margin-bottom: 0.3rem; }
+  .report-body code {
+    font-family: 'Courier New', monospace;
+    font-size: 0.85em;
+    background: var(--stone);
+    padding: 0.1em 0.35em;
+    border-radius: 2px;
+  }
+  .report-body pre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 1rem;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin-bottom: 0.9rem;
+    font-size: 0.85em;
+    font-family: 'Courier New', monospace;
+  }
+  .report-body pre code { background: none; padding: 0; }
+  .report-body a { color: var(--burgundy); }
+  .report-body blockquote {
+    border-left: 3px solid var(--gold);
+    margin: 0 0 0.9rem;
+    padding: 0.5rem 1rem;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .report-body table { border-collapse: collapse; width: 100%; margin-bottom: 0.9rem; }
+  .report-body th, .report-body td {
+    border: 1px solid var(--stone);
+    padding: 0.4rem 0.7rem;
+    text-align: left;
+    font-size: 0.9rem;
+  }
+  .report-body th { background: var(--stone); }
+  footer {
+    margin-top: 2rem;
+    text-align: center;
+    font-size: 0.78rem;
+    color: var(--muted);
+    font-family: sans-serif;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div class="label">Capsule Result · {{.Vignoble}}</div>
+    <h1>{{.Contract.Description}}</h1>
+    <div class="meta">
+      Contract: <code>{{.Contract.ContractID}}</code>
+      {{if .Contract.ResultURL}} · <a href="{{.Contract.ResultURL}}">View on Mnemosyne</a>{{end}}
+    </div>
+  </header>
+
+  {{if .Stats}}
+  <div class="stats-card">
+    <h2>Usage Summary</h2>
+    <div class="stats-grid">
+      {{if .Stats.Model}}<div class="stat"><div class="value">{{.Stats.Model}}</div><div class="key">Model</div></div>{{end}}
+      {{if .Stats.InputTokens}}<div class="stat"><div class="value">{{.Stats.InputTokens}}</div><div class="key">Input tokens</div></div>{{end}}
+      {{if .Stats.OutputTokens}}<div class="stat"><div class="value">{{.Stats.OutputTokens}}</div><div class="key">Output tokens</div></div>{{end}}
+      {{if .Stats.CacheReadTokens}}<div class="stat"><div class="value">{{.Stats.CacheReadTokens}}</div><div class="key">Cache-read tokens</div></div>{{end}}
+      {{if .Stats.ToolCalls}}<div class="stat"><div class="value">{{.Stats.ToolCalls}}</div><div class="key">Tool calls</div></div>{{end}}
+      {{if .Stats.Compactions}}<div class="stat"><div class="value">{{.Stats.Compactions}}</div><div class="key">Compactions</div></div>{{end}}
+    </div>
+  </div>
+  {{end}}
+
+  {{if .Links}}
+  <div class="links-bar">
+    {{range .Links}}<a href="{{.URL}}">{{.Label}}</a>{{end}}
+  </div>
+  {{end}}
+
+  <div class="report-body">
+    {{if .Report}}{{.Report}}{{else}}<p><em>No agent report was produced for this run.</em></p>{{end}}
+  </div>
+
+  <footer>Generated by Pinard · {{.Contract.ContractID}}</footer>
+</div>
+</body>
+</html>

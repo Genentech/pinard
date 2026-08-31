@@ -1,0 +1,6 @@
+apiVersion: v2
+name: pinard-nats
+description: NATS JetStream server with multi-tenant account setup for pinard
+type: application
+version: 0.42.0
+appVersion: "2.10.18"

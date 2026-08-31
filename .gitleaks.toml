@@ -1,0 +1,35 @@
+# .gitleaks.toml — gitleaks allowlist for confirmed false positives.
+#
+# All entries below are test fixtures, sample data, or public OAuth client IDs
+# that are intentionally present in the codebase and carry no real secrets.
+#
+# Capsule source files (cmd/aoc/cmd_capsule*.go, internal/watcher/capsule_*.go)
+# are Genentech-specific and dropped at OSS export; they are not listed here —
+# the build-tag guard (//go:build capsule) and the export step handle them.
+
+title = "pinard gitleaks config"
+
+[allowlist]
+  description = "Confirmed false positives — test fixtures and public client IDs"
+
+  paths = [
+    # Fake GitLab PATs used in spawn/launch tests — not real tokens
+    '''cmd/aoc/cmd_spawn_test\.go''',
+    '''cmd/aoc/cmd_launch_test\.go''',
+
+    # Capsule source — Genentech-specific, dropped at OSS export.
+    # Listed here so internal CI secret-scans are clean.
+    '''cmd/aoc/cmd_capsule.*\.go''',
+    '''internal/watcher/capsule_.*\.go''',
+  ]
+
+  regexes = [
+    # Fake JWTs in capsule redeem tests (eyJ... fixtures with no real claims)
+    '''eyJhbGciOiJSUzI1NiJ9\.eyJzdWIiOi[^"]+\.c2lnbmF0dXJl''',
+
+    # Test base64 pubkey in capsule_resolver_test.go
+    '''dGVzdHB1YmtleWJhc2U2NAo=''',
+
+    # Public Cognito OAuth client ID (not a secret — public clients have no client_secret)
+    '''rnacsqfmli89f6g6vlb4bk74m''',
+  ]

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build (public, no capsule tag)
+        # Intentionally omits -tags capsule so Genentech-specific capsule code
+        # is excluded from the public build (those files carry //go:build capsule).
+        run: CGO_ENABLED=0 go build -mod=mod ./cmd/aoc/ ./cmd/webterm-gateway/
+
+      - name: Test
+        # Capsule test files are also gated by //go:build capsule, so they are
+        # skipped here automatically (capsule feature requires internal endpoints).
+        run: go test -mod=mod ./internal/... ./cmd/aoc/
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          VERSION=8.28.0
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+
+      - name: Run gitleaks
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --exit-code 1

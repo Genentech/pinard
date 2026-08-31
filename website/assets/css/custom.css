@@ -1,0 +1,33 @@
+:root {
+    --primary-hue: 352deg;
+    --primary-saturation: 42%;
+}
+
+h1:not(.not-prose) {
+    color: #722F37 !important;
+}
+
+h2, h3, h4, h5, h6 {
+    color: #722F37 !important;
+}
+
+.pinard-feature-card {
+  --pinard-card-rgb: 114 47 55;
+  --pinard-card-alpha: 0.14;
+
+  background: radial-gradient(
+    ellipse at 50% 80%,
+    rgb(var(--pinard-card-rgb) / var(--pinard-card-alpha)),
+    hsl(0 0% 100% / 0)
+  );
+}
+
+.pinard-feature-card-light {
+  --pinard-card-rgb: 114 47 55;
+  --pinard-card-alpha: 0.10;
+}
+
+.pinard-feature-card-dark {
+  --pinard-card-rgb: 114 47 55;
+  --pinard-card-alpha: 0.20;
+}

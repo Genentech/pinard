@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pinard · {{.Target}}</title>
+  <link rel="stylesheet" href="/sessions/static/xterm.css" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; }
+    #hdr { font: 12px monospace; color: #9aa; background: #111; padding: 4px 8px; }
+    #hdr #mode.ro { color: #fc3; }
+    #hdr #mode.rw { color: #6c6; }
+    #hdr a#toggle { color: #9aa; font-size: 12px; margin-left: 6px; }
+    #hdr a#issue-link { color: #8bf; font-size: 12px; margin-left: 10px; text-decoration: none; }
+    #hdr a#issue-link:hover { text-decoration: underline; }
+    #hdr button#interrupt { font: 12px monospace; background: #300; color: #f88; border: 1px solid #600; border-radius: 3px; padding: 1px 6px; margin-left: 10px; cursor: pointer; }
+    #hdr button#interrupt:hover { background: #500; color: #faa; }
+    #term { position: absolute; top: 24px; left: 0; right: 0; bottom: 0; }
+  </style>
+</head>
+<body>
+  <div id="hdr">🍇 {{.Vignoble}} · 🖥️ {{.Target}} <span id="mode"></span> <a id="toggle" href="#"></a>{{if .IssueURL}} <a id="issue-link" href="{{.IssueURL}}" target="_blank" rel="noopener">📋 {{.IssueLabel}}</a>{{end}} <button id="interrupt" title="Send interrupt to agent">⛔ Interrupt</button> <span id="status"></span></div>
+  <div id="term"></div>
+  <script src="/sessions/static/xterm.js"></script>
+  <script src="/sessions/static/xterm-addon-fit.js"></script>
+  <script>
+    const term = new Terminal({ convertEol: false, cursorBlink: false, fontFamily: 'monospace', fontSize: 13 });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    const termEl = document.getElementById('term');
+    term.open(termEl);
+    const statusEl = document.getElementById('status');
+    function setStatus(s) { statusEl.textContent = s; }
+
+    // Writable ("steer") is granted by the gateway (operator only). When writable,
+    // keystrokes are sent to the session; otherwise they are dropped (read-only).
+    const writable = {{.Writable}};
+    // isFunder: capsule funder view — read-only, steer toggle hidden.
+    const isFunder = {{.IsFunder}};
+
+    // Mode indicator + steer toggle. Switching mode requires a full page reload
+    // because the writability grant is minted by the gateway at WS-upgrade time
+    // based on ?mode=rw; there is no in-protocol way to upgrade/downgrade an
+    // existing connection without a new grant from the gateway.
+    (function(){
+      const modeEl = document.getElementById('mode');
+      const tog = document.getElementById('toggle');
+      if (isFunder) {
+        modeEl.textContent = '· 🔒 capsule monitor (read-only)';
+        modeEl.className = 'ro';
+        tog.style.display = 'none';
+      } else {
+        modeEl.textContent = writable ? '· ✏️ steer (writable)' : '· read-only';
+        modeEl.className = writable ? 'rw' : 'ro';
+        const q = new URLSearchParams(location.search);
+        if (writable) { q.delete('mode'); tog.textContent = '→ read-only'; }
+        else { q.set('mode', 'rw'); tog.textContent = '✏️ request steer'; }
+        tog.href = location.pathname + '?' + q.toString();
+      }
+    })();
+
+    function sendResize(ws) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    }
+
+    // activeWS is set once the connection opens; used by the ResizeObserver and
+    // heartbeat so they always reference the live socket.
+    let activeWS = null;
+
+    // ResizeObserver handles subsequent container size changes (window resize, zoom, etc.).
+    new ResizeObserver(() => { fit.fit(); sendResize(activeWS); }).observe(termEl);
+
+    // Heartbeat keeps the responder-side idle watchdog fed.
+    setInterval(() => {
+      if (activeWS && activeWS.readyState === WebSocket.OPEN)
+        activeWS.send(JSON.stringify({ type: 'heartbeat' }));
+    }, 20000);
+
+    // Interrupt button: send interrupt control frame (allowed in all modes).
+    document.getElementById('interrupt').addEventListener('click', () => {
+      if (activeWS && activeWS.readyState === WebSocket.OPEN)
+        activeWS.send(JSON.stringify({ type: 'interrupt' }));
+    });
+
+    // Fit the terminal before opening the WebSocket so we can seed the initial
+    // cols/rows into the ReqMsg — eliminating the 80×24 flash on first load.
+    document.fonts.ready.then(() => {
+      requestAnimationFrame(() => {
+        fit.fit();
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const q = new URLSearchParams(location.search);
+        q.set('cols', String(term.cols));
+        q.set('rows', String(term.rows));
+        const ws = new WebSocket(proto + '//' + location.host + '/sessions/ws?' + q.toString());
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = () => { activeWS = ws; setStatus('· connected'); sendResize(ws); };
+        ws.onmessage = (ev) => {
+          if (typeof ev.data === 'string') {
+            // control/text frames from the gateway (e.g. end notices)
+            term.write(ev.data);
+          } else {
+            term.write(new Uint8Array(ev.data));
+          }
+        };
+        ws.onclose = () => { activeWS = null; setStatus('· disconnected'); term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n'); };
+        ws.onerror = () => { setStatus('· error'); };
+        term.onData((d) => {
+          if (writable && ws.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(d));
+        });
+      });
+    });
+  </script>
+</body>
+</html>

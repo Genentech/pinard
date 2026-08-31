@@ -1,0 +1,9 @@
+baseURL = "/"
+title = "Pinard"
+languageCode = "en-US"
+enableEmoji = true
+
+disableKinds = ["taxonomy", "term", "RSS", "sitemap", "robotsTXT"]
+
+[markup.goldmark.renderer]
+  unsafe = true

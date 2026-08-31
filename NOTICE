@@ -1,0 +1,35 @@
+Pinard
+Copyright (c) 2026 Genentech, Inc.
+
+This product is licensed under the terms of the MIT License (see LICENSE).
+
+This product includes third-party open-source software. The following notable
+components are used or bundled; each remains under its own license and copyright.
+This list is not exhaustive — see the respective dependency manifests (go.mod /
+go.sum, pi-extension package manifests) and each project's repository for the
+complete, authoritative license text and copyright notices.
+
+Go dependencies
+---------------
+- github.com/charmbracelet/bubbletea, bubbles, lipgloss — © Charmbracelet, Inc. — MIT
+- github.com/spf13/cobra — © Steve Francia et al. — Apache-2.0
+- github.com/nats-io/nats.go, nats-server — © The NATS Authors — Apache-2.0
+- github.com/coreos/go-oidc — © CoreOS/Red Hat — Apache-2.0
+- github.com/go-jose/go-jose — © Square, Inc. and contributors — Apache-2.0
+- github.com/gorilla/websocket — © The Gorilla Authors — BSD-3-Clause
+- golang.org/x/oauth2 — © The Go Authors — BSD-3-Clause
+- gopkg.in/yaml.v3 — © Kanaka Das / Canonical — MIT and Apache-2.0
+
+Bundled components / submodules
+-------------------------------
+- babysitter (deps/babysitter) — https://github.com/a5c-ai/babysitter —
+  MIT — © 2025 A5C AI
+
+Runtime
+-------
+- Pinard orchestrates the "pi" coding agent (@earendil-works/pi-coding-agent) and
+  a vendored Node.js runtime for its extensions. These are separately licensed by
+  their respective authors.
+
+Full third-party license texts for the compiled Go binary can be regenerated with
+a tool such as `go-licenses` (e.g. `go-licenses report ./...`).

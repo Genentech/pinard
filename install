@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+echo "Installing pinard from $REPO_DIR"
+
+# 1. Check prerequisites
+echo "  Checking prerequisites..."
+for cmd in pi go node npm glab git tmux fzf; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "  ERROR: $cmd not found. Please install it first." >&2
+    exit 1
+  fi
+done
+echo "  ✓ pi, go, node, glab, git, tmux, fzf"
+
+# 1b. Runtime versions: Node + Pi. pi (core) requires Node >=22.19.0; .nvmrc pins
+# node 22 (LTS) because it ships native prebuilts (better-sqlite3) so the deploy
+# needs no C++20 compiler. The required Pi version is read from
+# pi-extension/package.json so this stays in lockstep with the type-check deps.
+echo "  Checking runtime (Node + Pi)..."
+NVMRC="$(cat "$REPO_DIR/.nvmrc" 2>/dev/null || echo 22)"
+# Bring up the pinned Node via nvm when available (idempotent). Relax `set -u`
+# around nvm.sh (it references unbound vars internally).
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+  set +u
+  # shellcheck disable=SC1090
+  . "$HOME/.nvm/nvm.sh"
+  nvm install "$NVMRC" >/dev/null 2>&1 || true
+  nvm use "$NVMRC" >/dev/null 2>&1 || true
+  nvm alias default "$NVMRC" >/dev/null 2>&1 || true
+  set -u
+fi
+NODE_VER="$(node -p 'process.versions.node' 2>/dev/null || echo 0.0.0)"
+if [ "$(printf '%s\n22.19.0\n' "$NODE_VER" | sort -V | head -1)" != "22.19.0" ]; then
+  echo "  ERROR: Node $NODE_VER found; pinard needs Node >=22.19.0 (node 22 LTS recommended — ships native prebuilts). Install it (e.g. 'nvm install $NVMRC') and re-run." >&2
+  exit 1
+fi
+echo "  ✓ Node $(node --version)"
+
+# Required Pi from pi-extension/package.json; (re)install globally if the current
+# global Pi is older than what the extensions are built against.
+PI_REQ="$(node -p "require('$REPO_DIR/pi-extension/package.json').devDependencies['@earendil-works/pi-coding-agent'].replace(/[^0-9.]/g,'')" 2>/dev/null || echo 0.80.6)"
+PI_CUR="$(npm ls -g @earendil-works/pi-coding-agent --depth=0 2>/dev/null | sed -n 's/.*pi-coding-agent@\([0-9][0-9.]*\).*/\1/p' | head -1 || true)"
+PI_CUR="${PI_CUR:-0.0.0}"
+if [ "$(printf '%s\n%s\n' "$PI_REQ" "$PI_CUR" | sort -V | head -1)" != "$PI_REQ" ]; then
+  echo "  Upgrading Pi $PI_CUR → $PI_REQ (npm -g)..."
+  npm install -g "@earendil-works/pi-coding-agent@$PI_REQ" >/dev/null 2>&1 \
+    && echo "  ✓ Pi $PI_REQ" \
+    || { echo "  ERROR: failed to install Pi $PI_REQ globally (npm install -g @earendil-works/pi-coding-agent@$PI_REQ)." >&2; exit 1; }
+else
+  echo "  ✓ Pi $PI_CUR (>= $PI_REQ)"
+fi
+
+# 2. Build and install Go binary
+echo "  Building aoc..."
+mkdir -p "$HOME/.local/bin"
+# Genentech-specific capsule/Mnemosyne funding is gated behind the `capsule`
+# build tag. Internal builds (capsule source present) include it; the public OSS
+# export drops the capsule source, so this builds tag-less automatically.
+BUILD_TAGS=""
+[ -f "$REPO_DIR/cmd/aoc/cmd_capsule.go" ] && BUILD_TAGS="-tags capsule"
+(cd "$REPO_DIR" && CGO_ENABLED=0 go build $BUILD_TAGS -o "$HOME/.local/bin/aoc" ./cmd/aoc/)
+echo "  ✓ ~/.local/bin/aoc${BUILD_TAGS:+ (with capsule)}"
+
+# 3. Symlink pinard launcher and picker
+ln -sf "$REPO_DIR/bin/pinard" "$HOME/.local/bin/pinard"
+ln -sf "$REPO_DIR/bin/pinard-picker" "$HOME/.local/bin/pinard-picker"
+echo "  ✓ ~/.local/bin/pinard, pinard-picker"
+
+# 4. Bootstrap deps (shared with dist/build.sh — single source of truth in
+# scripts/bootstrap-deps.sh, so ./install and the make-dist artifact never drift):
+# babysitter submodule + SDK build + @a5c-ai/babysitter-sdk resolver symlink +
+# pi-extension deps (., pinard, worker). Previously ./install skipped the
+# babysitter submodule/SDK entirely, so host (non-dist) workers hit
+# MODULE_NOT_FOUND on the babysitter CLI / '@a5c-ai/babysitter-sdk'.
+echo "  Bootstrapping dependencies (babysitter submodule + SDK + extensions)..."
+bash "$REPO_DIR/scripts/bootstrap-deps.sh" "$REPO_DIR"
+echo "  ✓ deps bootstrapped"
+
+# 4b. Type-check the Pi extensions (TypeScript is loaded untranspiled by Pi,
+# so this is the only gate that catches typos/undefined-var bugs before runtime).
+echo "  Type-checking extensions..."
+(cd "$REPO_DIR/pi-extension" && npm install --silent 2>/dev/null && npm run --silent typecheck) \
+  && echo "  ✓ extensions type-check clean" \
+  || echo "  ⚠ extension type-check FAILED — fix before workers run (cd pi-extension && npm run typecheck)"
+
+# 4c. Install pre-commit hooks (type-check + internal-refs denylist), composed
+# with any existing hook (e.g. git-annex) so we don't clobber it.
+HOOK="$REPO_DIR/.git/hooks/pre-commit"
+HOOK_TYPECHECK='"$(git rev-parse --show-toplevel)"/scripts/pre-commit-typecheck.sh'
+HOOK_DENYLIST='"$(git rev-parse --show-toplevel)"/scripts/check-internal-refs.sh'
+if [[ -d "$REPO_DIR/.git" ]]; then
+  if [[ -f "$HOOK" ]] && grep -q "pre-commit-typecheck.sh" "$HOOK"; then
+    echo "  · pre-commit type-check hook (already wired)"
+  elif [[ -f "$HOOK" ]]; then
+    printf '\n%s || exit 1\n' "$HOOK_TYPECHECK" >> "$HOOK"
+    echo "  ✓ pre-commit type-check hook (appended to existing hook)"
+  else
+    printf '#!/bin/sh\n%s || exit 1\n' "$HOOK_TYPECHECK" > "$HOOK"
+    chmod +x "$HOOK"
+    echo "  ✓ pre-commit type-check hook (created)"
+  fi
+  if [[ -f "$HOOK" ]] && grep -q "check-internal-refs.sh" "$HOOK"; then
+    echo "  · pre-commit denylist guard (already wired)"
+  else
+    printf '\n%s || exit 1\n' "$HOOK_DENYLIST" >> "$HOOK"
+    echo "  ✓ pre-commit denylist guard (appended)"
+  fi
+fi
+
+# 5. Install engram binary (Go, memory server for agents). Pin the host CLI to the
+# SAME version the cluster runs (.engram-version) so local and cloud engram stay
+# in lockstep — a version drift can make cloud sync fail (mutation/chunk format
+# mismatch). This upgrades or downgrades an existing binary to match the pin; it
+# does NOT track GitHub "latest" (which would drift).
+ENGRAM_VERSION="$(cat "$REPO_DIR/.engram-version" 2>/dev/null | tr -d '[:space:]')"
+ENGRAM_INSTALLED="$(engram --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+if [[ -z "$ENGRAM_VERSION" ]]; then
+  echo "  · engram: could not read pinned version from .engram-version — skipping"
+elif [[ "$ENGRAM_INSTALLED" == "$ENGRAM_VERSION" ]]; then
+  echo "  · engram v${ENGRAM_VERSION} (already at pinned version)"
+else
+  if [[ -n "$ENGRAM_INSTALLED" ]]; then
+    echo "  Updating engram v${ENGRAM_INSTALLED} → v${ENGRAM_VERSION} (lockstep with cluster)..."
+  else
+    echo "  Installing engram v${ENGRAM_VERSION}..."
+  fi
+  ARCH="$(uname -m)"
+  case "$ARCH" in
+    x86_64)  ENGRAM_ARCH="amd64" ;;
+    aarch64) ENGRAM_ARCH="arm64" ;;
+    *)       ENGRAM_ARCH="" ;;
+  esac
+  if [[ -n "$ENGRAM_ARCH" ]]; then
+    ENGRAM_URL="https://github.com/Gentleman-Programming/engram/releases/download/v${ENGRAM_VERSION}/engram_${ENGRAM_VERSION}_linux_${ENGRAM_ARCH}.tar.gz"
+    # Install into the same dir as any existing binary so the upgrade wins on PATH.
+    ENGRAM_DEST_DIR="$(dirname "$(command -v engram 2>/dev/null || echo "$HOME/.local/bin/engram")")"
+    if curl -fsSL "$ENGRAM_URL" | tar -xz -C "$ENGRAM_DEST_DIR" engram 2>/dev/null; then
+      chmod +x "$ENGRAM_DEST_DIR/engram"
+      echo "  ✓ engram v${ENGRAM_VERSION} (${ENGRAM_ARCH}) → $ENGRAM_DEST_DIR"
+    else
+      echo "  · engram download failed — install manually: go install github.com/Gentleman-Programming/engram/cmd/engram@latest"
+    fi
+  else
+    echo "  · engram: unsupported arch $ARCH — install manually"
+  fi
+fi
+
+# 6. Install Pi extensions
+for ext in pi-permission-system gentle-engram pi-tool-display pi-session-cleanup; do
+  if ! pi list 2>/dev/null | grep -q "$ext"; then
+    echo "  Installing $ext..."
+    pi install "npm:$ext" 2>/dev/null || true
+  fi
+done
+
+# 6b. pi-tool-display config: opencode preset (compact, tool output collapsed),
+# applied globally so both conductor and workers render the same way.
+TOOL_DISPLAY_CONFIG="$HOME/.pi/agent/extensions/pi-tool-display/config.json"
+if [[ ! -f "$TOOL_DISPLAY_CONFIG" ]]; then
+  mkdir -p "$(dirname "$TOOL_DISPLAY_CONFIG")"
+  cat > "$TOOL_DISPLAY_CONFIG" << 'EOF'
+{
+  "debug": false,
+  "registerToolOverrides": {
+    "read": true,
+    "grep": true,
+    "find": true,
+    "ls": true,
+    "bash": true,
+    "edit": true,
+    "write": true
+  },
+  "enableNativeUserMessageBox": true,
+  "readOutputMode": "hidden",
+  "searchOutputMode": "hidden",
+  "mcpOutputMode": "hidden",
+  "previewLines": 8,
+  "expandedPreviewMaxLines": 4000,
+  "bashOutputMode": "opencode",
+  "bashCollapsedLines": 10,
+  "diffViewMode": "auto",
+  "diffIndicatorMode": "bars",
+  "diffSplitMinWidth": 120,
+  "diffCollapsedLines": 24,
+  "diffWordWrap": true,
+  "showTruncationHints": false,
+  "showRtkCompactionHints": false
+}
+EOF
+  echo "  ✓ pi-tool-display config (opencode preset)"
+else
+  echo "  · pi-tool-display config (exists, skipped)"
+fi
+
+# context-mode requires GCC 10+ for better-sqlite3 — skip if build fails
+if ! pi list 2>/dev/null | grep -q "context-mode"; then
+  echo "  Installing context-mode (optional, needs GCC 10+)..."
+  pi install npm:context-mode 2>/dev/null || echo "  · context-mode skipped (native build failed)"
+fi
+# Init engram MCP config (one-time, idempotent)
+if command -v pi-engram &>/dev/null; then
+  pi-engram init 2>/dev/null || true
+fi
+echo "  ✓ Pi extensions + engram MCP config"
+
+# 7. Pi permissions policy (global — allow all pinard tools by default)
+PERMISSIONS_FILE="$HOME/.pi/agent/pi-permissions.jsonc"
+if [[ ! -f "$PERMISSIONS_FILE" ]]; then
+  mkdir -p "$(dirname "$PERMISSIONS_FILE")"
+  cat > "$PERMISSIONS_FILE" << 'EOF'
+{
+  "defaultPolicy": {
+    "tools": "allow",
+    "bash": "allow",
+    "mcp": "deny",
+    "skills": "allow",
+    "special": "allow"
+  },
+  "special": {
+    "external_directory": "allow"
+  }
+}
+EOF
+  echo "  ✓ pi-permissions.jsonc (created)"
+else
+  echo "  · pi-permissions.jsonc (exists, skipped)"
+fi
+
+# 7b. Worker permissions policy (trusted level — enforces external_directory: deny).
+# Workers run with PI_PERMISSION_SYSTEM_POLICY_AGENT_DIR pointed here so they
+# cannot read/scan outside their worktree, regardless of the global allow above.
+# cmd_spawn.go also writes this at spawn time as defense-in-depth.
+WORKER_POLICY_DIR="$HOME/.pi/agent/worker-policy"
+mkdir -p "$WORKER_POLICY_DIR"
+cat > "$WORKER_POLICY_DIR/pi-permissions.jsonc" << 'EOF'
+{
+  "defaultPolicy": {
+    "tools": "allow",
+    "bash": "allow",
+    "mcp": "deny",
+    "skills": "allow",
+    "special": "allow"
+  },
+  "special": {
+    "external_directory": "deny"
+  }
+}
+EOF
+echo "  ✓ worker-policy (external_directory: deny)"
+
+# 8. Credentials template
+CREDS_FILE="$HOME/.config/pinard/credentials.yaml"
+if [[ ! -f "$CREDS_FILE" ]]; then
+  mkdir -p "$(dirname "$CREDS_FILE")"
+  cat > "$CREDS_FILE" << 'EOF'
+gitlab:
+  host: gitlab.example.com
+  user: CHANGE_ME
+  token_env: PINARD_GITLAB_TOKEN
+  ssh_key: ~/.ssh/pinard_id_ed25519
+  git_name: Pinard
+  git_email: CHANGE_ME@example.com
+
+nats:
+  url: wss://nats.example.com
+  user: CHANGE_ME
+  password_env: PINARD_NATS_PASSWORD
+
+# engram cloud replication (optional — omit to keep memory local-only)
+# cloud_token_env names an env var holding the bearer token; or use cloud_token
+# for a literal value. ENGRAM_CLOUD_TOKEN is set in ~/.config/pinard/env.
+# cloud.json in each vignoble's .engram/ intentionally has an empty token field —
+# engram cloud config only sets the server URL; the token flows via env exclusively.
+#engram:
+#  server: https://engram.example.com
+#  cloud_token_env: ENGRAM_CLOUD_TOKEN
+EOF
+  echo "  ✓ credentials.yaml (TEMPLATE — edit before use)"
+else
+  echo "  · credentials.yaml (exists, skipped)"
+fi
+# credentials.yaml holds secrets (tokens, engram cloud_token) — lock it down
+# regardless of whether we just created it or it already existed. Idempotent.
+chmod 600 "$CREDS_FILE"
+chmod 700 "$(dirname "$CREDS_FILE")"
+
+# 9. CA certs directory (place any custom CA .crt files here for NATS WebSocket TLS)
+CERTS_DIR="$HOME/.config/pinard/certs"
+if [[ ! -d "$CERTS_DIR" ]]; then
+  mkdir -p "$CERTS_DIR"
+  echo "  ✓ CA certs directory created (add custom CA .crt files if needed)"
+else
+  echo "  · CA certs directory (exists, skipped)"
+fi
+
+# 10. Remove stale global extension symlink (causes tool conflicts with workers)
+if [[ -L "$HOME/.pi/agent/extensions/pinard.ts" ]]; then
+  rm "$HOME/.pi/agent/extensions/pinard.ts"
+  echo "  ✓ Removed stale pinard.ts global extension symlink"
+fi
+
+echo ""
+echo "Done. Next steps:"
+echo ""
+echo "  1. Edit ~/.config/pinard/credentials.yaml (replace CHANGE_ME)"
+echo "  2. Set env vars in ~/.bashrc:"
+echo "     export PINARD_GITLAB_TOKEN=\"glpat-...\""
+echo "     export PINARD_NATS_PASSWORD=\"...\""
+echo "  3. Generate SSH key: ssh-keygen -t ed25519 -C pinard -f ~/.ssh/pinard_id_ed25519 -N \"\""
+echo "  4. Init a vignoble: aoc init myproject --gitlab-host gitlab.example.com"
+echo "  5. Start: cd ~/vignoble-myproject && pinard"
+echo ""
+echo "  See docs/gitlab-setup.md for GitLab user setup."
+echo "  See docs/nats-multi-tenant.md for NATS cluster setup."

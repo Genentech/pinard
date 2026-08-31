@@ -1,0 +1,31 @@
+{{- if .Values.websocket.enabled }}
+{{- if .Values.websocket.ingressRoute.enabled }}
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ include "pinard-nats.fullname" . }}-ws
+  labels:
+    {{- include "pinard-nats.labels" . | nindent 4 }}
+  {{- with .Values.websocket.ingressRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  entryPoints:
+    {{- toYaml .Values.websocket.ingressRoute.entryPoints | nindent 4 }}
+  routes:
+    - match: Host(`{{ .Values.websocket.ingressRoute.host }}`)
+      kind: Rule
+      services:
+        - name: {{ include "pinard-nats.fullname" . }}
+          port: {{ .Values.websocket.port }}
+      {{- with .Values.websocket.ingressRoute.middlewares }}
+      middlewares:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.websocket.ingressRoute.tls }}
+  tls:
+    {{- toYaml .Values.websocket.ingressRoute.tls | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

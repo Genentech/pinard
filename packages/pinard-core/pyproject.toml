@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pinard-core"
+version = "1.0.0"
+description = "pinard-core — versioned ontology package (entities, edges, registry, versioning)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["pydantic>=2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pinard_core"]
+
+[tool.tox]
+legacy_tox_ini = """
+[tox]
+envlist = build
+skipsdist = true
+
+[testenv:build]
+deps = build
+commands = python -m build --wheel --outdir dist/
+
+[testenv:publish]
+deps = twine
+commands = twine upload {posargs} dist/*.whl
+"""
+
+# No [tool.commitizen] here: pinard-core is versioned WITH the pinard image.
+# CI's push-pypi stamps this file's version from the image-* release tag and
+# publishes the wheel alongside push-ecr (see .gitlab-ci.yml).

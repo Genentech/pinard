@@ -1,0 +1,12 @@
+{
+  "name": "pinard",
+  "version": "0.1.0",
+  "description": "Agent orchestrator conductor for Pi — spawns, monitors, and manages Claude workers",
+  "main": "index.ts",
+  "dependencies": {
+    "@nats-io/jetstream": "^3.4.0",
+    "@nats-io/kv": "^3.4.0",
+    "@nats-io/transport-node": "^3.4.0",
+    "ws": "^8.18.0"
+  }
+}

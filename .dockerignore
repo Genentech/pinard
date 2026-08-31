@@ -1,0 +1,23 @@
+# Keep the build context lean (root Dockerfile builds hugo + gateway).
+.git
+.worktrees
+node_modules
+**/node_modules
+website/public
+website/resources
+website/.hugo_build.lock
+dist
+releases
+lib
+bin
+deps
+tests
+charts
+docs
+openspec
+*.run
+*.sif
+.engram
+.pi
+.claude
+logs
