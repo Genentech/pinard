@@ -101,9 +101,15 @@ export async function process(inputs = {}, ctx) {
   let tests = await ctx.task(runTests, {});
   if (!tests.passed) {
     // A gate: pause for a verdict (human or conductor) before continuing.
-    await ctx.breakpoint({
+    // The verdict object carries { approved, option, response }.
+    const verdict = await ctx.breakpoint({
       question: `Tests still failing after a fix attempt — retry, skip, or abort?`,
+      options: ['Retry', 'Skip tests', 'Abort'],
     });
+    if (verdict.option?.toLowerCase().includes('abort')) return { status: 'aborted' };
+    if (verdict.option?.toLowerCase().includes('skip')) {
+      // continue without re-running tests
+    }
   }
 
   const mr = await ctx.task(openMR, { project, runId });
@@ -116,7 +122,7 @@ The primitives you compose:
 | Primitive | Purpose |
 |-----------|---------|
 | `ctx.task(def, args)` | Run a step (agent turn or deterministic task); returns its typed result. Journaled. |
-| `ctx.breakpoint({ question })` | A **gate** — pause the loop for a verdict/decision. The worker asks the operator (interactively) and records their decision; set `PINARD_BREAKPOINT_AUTO_APPROVE=1` to auto-approve gates for fully unattended runs. Journaled. |
+| `ctx.breakpoint({ question, options? })` | A **gate** — pause the loop for a verdict/decision. Returns `{ approved, option, response }`. `approved` is `true` for any non-abort selection; `false` only for Abort. When `options` are provided the operator chooses one and its verbatim text is in `option` — use `gate.option.includes('skip')` to branch. Set `PINARD_BREAKPOINT_AUTO_APPROVE=1` to auto-approve gates for fully unattended runs. Journaled. |
 | plain JS (`if`, `for`, `try`) | Deterministic control flow — the "semi-deterministic" half. |
 | `return` | Terminal condition — the loop's honest outcome. |
 

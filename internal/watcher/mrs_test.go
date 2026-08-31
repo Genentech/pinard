@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -861,10 +862,407 @@ func TestShouldPublishMRMemory(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldPublishMRMemory(&tt.mr)
+			got := ShouldPublishMRMemory(&tt.mr)
 			if got != tt.want {
-				t.Errorf("shouldPublishMRMemory() = %v, want %v", got, tt.want)
+				t.Errorf("ShouldPublishMRMemory() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// mockMRMemoryGitLab implements mrMemoryGitLab for unit tests.
+type mockMRMemoryGitLab struct {
+	changes       []string
+	changesErr    error
+	closingIssues []gitlab.Issue
+	closingErr    error
+	issues        map[int]*gitlab.Issue
+	notes         []gitlab.Note
+	notesErr      error
+}
+
+func (m *mockMRMemoryGitLab) GetMRChanges(repo string, iid int) ([]string, error) {
+	return m.changes, m.changesErr
+}
+
+func (m *mockMRMemoryGitLab) GetMRClosingIssues(repo string, iid int) ([]gitlab.Issue, error) {
+	return m.closingIssues, m.closingErr
+}
+
+func (m *mockMRMemoryGitLab) GetIssue(repo string, iid int) (*gitlab.Issue, error) {
+	if iss, ok := m.issues[iid]; ok {
+		return iss, nil
+	}
+	return nil, fmt.Errorf("issue #%d not found", iid)
+}
+
+func (m *mockMRMemoryGitLab) ListMRNotes(repo string, iid int) ([]gitlab.Note, error) {
+	return m.notes, m.notesErr
+}
+
+func TestBuildMRMemoryPayload(t *testing.T) {
+	mr := &gitlab.MergeRequest{
+		IID:          42,
+		Title:        "feat: add caching",
+		Description:  "Adds an LRU cache. Closes #7.",
+		SourceBranch: "feat/caching",
+		MergedAt:     "2026-01-15T12:00:00Z",
+		Author:       gitlab.Author{Username: "dev1"},
+		WebURL:       "https://code.example.com/group/proj/-/merge_requests/42",
+	}
+
+	gl := &mockMRMemoryGitLab{
+		changes: []string{"internal/cache/cache.go", "cmd/aoc/main.go"},
+		closingIssues: []gitlab.Issue{
+			{IID: 7, Title: "Support caching", Description: "We need an LRU cache."},
+		},
+	}
+
+	payload, _, err := BuildMRMemoryPayload(gl, "myproject", "group/proj", mr)
+	if err != nil {
+		t.Fatalf("BuildMRMemoryPayload returned unexpected error: %v", err)
+	}
+
+	assertEqual := func(field string, got, want any) {
+		t.Helper()
+		if got != want {
+			t.Errorf("payload[%q] = %v, want %v", field, got, want)
+		}
+	}
+
+	assertEqual("source", payload["source"], "mr")
+	assertEqual("project", payload["project"], "myproject")
+	assertEqual("repo", payload["repo"], "group/proj")
+	assertEqual("iid", payload["iid"], 42)
+	assertEqual("scope", payload["scope"], "myproject")
+	assertEqual("title", payload["title"], "feat: add caching")
+	assertEqual("description", payload["description"], "Adds an LRU cache. Closes #7.")
+	assertEqual("merged_at", payload["merged_at"], "2026-01-15T12:00:00Z")
+	assertEqual("author", payload["author"], "dev1")
+	assertEqual("url", payload["url"], "https://code.example.com/group/proj/-/merge_requests/42")
+
+	files, ok := payload["files_changed"].([]string)
+	if !ok {
+		t.Fatalf("payload[\"files_changed\"] is not []string: %T", payload["files_changed"])
+	}
+	if len(files) != 2 || files[0] != "internal/cache/cache.go" {
+		t.Errorf("unexpected files_changed: %v", files)
+	}
+
+	issues, ok := payload["issues"].([]MRMemoryIssueContext)
+	if !ok {
+		t.Fatalf("payload[\"issues\"] is not []MRMemoryIssueContext: %T", payload["issues"])
+	}
+	if len(issues) != 1 {
+		t.Fatalf("expected 1 closing issue, got %d", len(issues))
+	}
+	if issues[0].IID != 7 || issues[0].Title != "Support caching" || issues[0].Description != "We need an LRU cache." {
+		t.Errorf("unexpected closing issue: %+v", issues[0])
+	}
+}
+
+func TestBuildMRMemoryPayload_FallbackToDescriptionParsing(t *testing.T) {
+	mr := &gitlab.MergeRequest{
+		IID:         99,
+		Title:       "fix: bug",
+		Description: "Fixes something.\n\nCloses #3",
+		MergedAt:    "2026-02-01T00:00:00Z",
+		Author:      gitlab.Author{Username: "alice"},
+		WebURL:      "https://code.example.com/g/p/-/merge_requests/99",
+	}
+
+	gl := &mockMRMemoryGitLab{
+		changes:    []string{"foo.go"},
+		closingErr: fmt.Errorf("API unavailable"),
+		issues: map[int]*gitlab.Issue{
+			3: {IID: 3, Title: "Bug report", Description: "There is a bug."},
+		},
+	}
+
+	payload, _, err := BuildMRMemoryPayload(gl, "proj", "g/p", mr)
+	if err != nil {
+		t.Fatalf("BuildMRMemoryPayload returned unexpected error: %v", err)
+	}
+
+	issues, ok := payload["issues"].([]MRMemoryIssueContext)
+	if !ok {
+		t.Fatalf("payload[\"issues\"] is not []MRMemoryIssueContext: %T", payload["issues"])
+	}
+	if len(issues) != 1 || issues[0].IID != 3 {
+		t.Errorf("expected fallback issue #3, got %v", issues)
+	}
+}
+
+func TestBuildMRMemoryPayload_ReviewNotes(t *testing.T) {
+	// BuildMRMemoryPayload must include pre-filtered review_notes in the payload
+	// and return all raw notes to the caller for @memory: scanning.
+	// Models the !364 scenario: conductor is the reviewer, so notes carry
+	// <!-- pinard:conductor --> alongside substantive content.
+	mr := &gitlab.MergeRequest{
+		IID:         364,
+		Title:       "feat(webterm): PTY viewer",
+		Description: "Read-only PTY via tmux attach -r.",
+		MergedAt:    "2026-08-28T00:00:00Z",
+		Author:      gitlab.Author{Username: "dev"},
+		WebURL:      "https://code.example.com/g/p/-/merge_requests/364",
+	}
+	gl := &mockMRMemoryGitLab{
+		changes: []string{"responder.go"},
+		notes: []gitlab.Note{
+			// #1 system note — always dropped
+			{ID: 1, System: true, Body: "approved this merge request", Author: gitlab.Author{Username: "gitlab"}},
+			// #2 pure marker — nothing survives after stripping
+			{ID: 2, Body: "<!-- pinard:webterm-link -->", Author: gitlab.Author{Username: "pinard"}},
+			// #3 conductor note with substantive content — marker line stripped, prose kept
+			{ID: 3, Body: "<!-- pinard:conductor -->\nLooks good. **Notes from review:** pumpBytes is shared.", Author: gitlab.Author{Username: "pinard"}},
+			// #4 conductor note that is the security gem — must survive
+			{ID: 4, Body: "<!-- pinard:conductor -->\nDid a dedicated security pass — no host-access/write path; read-only integrity holds.", Author: gitlab.Author{Username: "pinard"}},
+			// #5 @memory: marker note — substantive, must survive
+			{ID: 5, Body: "@memory: grant must be verified on attach.", Author: gitlab.Author{Username: "reviewer"}},
+		},
+	}
+
+	payload, allNotes, err := BuildMRMemoryPayload(gl, "proj", "g/p", mr)
+	if err != nil {
+		t.Fatalf("BuildMRMemoryPayload returned error: %v", err)
+	}
+
+	// review_notes must have notes #3, #4, #5 (marker lines stripped); #1 system, #2 pure-marker dropped.
+	rn, ok := payload["review_notes"].([]MRMemoryReviewNote)
+	if !ok {
+		t.Fatalf("review_notes is not []MRMemoryReviewNote: %T", payload["review_notes"])
+	}
+	if len(rn) != 3 {
+		t.Errorf("expected 3 review notes, got %d: %+v", len(rn), rn)
+	}
+	if len(rn) >= 1 && !strings.Contains(rn[0].Body, "pumpBytes") {
+		t.Errorf("note 0 body should contain 'pumpBytes', got %q", rn[0].Body)
+	}
+	if len(rn) >= 1 && strings.Contains(rn[0].Body, "pinard:conductor") {
+		t.Errorf("note 0 body must not contain the conductor marker, got %q", rn[0].Body)
+	}
+	if len(rn) >= 2 && !strings.Contains(rn[1].Body, "security pass") {
+		t.Errorf("note 1 body should contain 'security pass', got %q", rn[1].Body)
+	}
+	if len(rn) >= 3 && !strings.Contains(rn[2].Body, "grant must be verified") {
+		t.Errorf("note 2 body should contain 'grant must be verified', got %q", rn[2].Body)
+	}
+
+	// allNotes must include ALL notes (for @memory: scanning).
+	if len(allNotes) != 5 {
+		t.Errorf("expected 5 allNotes, got %d", len(allNotes))
+	}
+
+	// ExtractMemoryMarkers must pick up note #5.
+	markers := ExtractMemoryMarkers(allNotes)
+	if len(markers) != 1 || markers[0] != "grant must be verified on attach." {
+		t.Errorf("ExtractMemoryMarkers: got %v, want [grant must be verified on attach.]", markers)
+	}
+}
+
+// ── §10 @memory: marker tests ─────────────────────────────────────────────
+
+func TestExtractMemoryMarker_Detected(t *testing.T) {
+	tests := []struct {
+		body  string
+		want  string
+		hasIt bool
+	}{
+		{"@memory: pty.out must be scoped per tenant in multi-tenant NATS", "pty.out must be scoped per tenant in multi-tenant NATS", true},
+		{"@Memory: Some constraint", "Some constraint", true},
+		{"@MEMORY: upper case", "upper case", true},
+		{"@memory:no space after colon is fine", "no space after colon is fine", true},
+		{"LGTM, no memory here", "", false},
+		{"pinard: some other marker", "", false},
+		{"  @memory:   leading whitespace body  ", "leading whitespace body", true},
+	}
+	for _, tt := range tests {
+		got := extractMemoryMarker(tt.body)
+		if tt.hasIt && got != tt.want {
+			t.Errorf("extractMemoryMarker(%q) = %q, want %q", tt.body, got, tt.want)
+		}
+		if !tt.hasIt && got != "" {
+			t.Errorf("extractMemoryMarker(%q) = %q, want empty", tt.body, got)
+		}
+	}
+}
+
+// ── §9 review noise filter tests ─────────────────────────────────────────────
+
+func TestIsReviewNoise(t *testing.T) {
+	noisy := []string{
+		"LGTM", "lgtm", "Looks good to me", "looks good",
+		"tests pass", "Tests Passed", "CI passed", "pipeline success",
+		"pushed a commit", "pushed commit", "rebased", "rebase",
+		"merge when green", "merge once ready", "Thanks.", "thanks!",
+	}
+	for _, s := range noisy {
+		if !isReviewNoise(s) {
+			t.Errorf("isReviewNoise(%q) = false, want true", s)
+		}
+	}
+
+	substantive := []string{
+		"The grant bypass is a security hole — the grant must be verified on every attach.",
+		"pty.out is not scoped per tenant; in multi-tenant this leaks terminal output.",
+		"Why did we choose X over Y here?",
+		"Good catch, but the real issue is that the token is not invalidated on disconnect.",
+	}
+	for _, s := range substantive {
+		if isReviewNoise(s) {
+			t.Errorf("isReviewNoise(%q) = true, want false (substantive content)", s)
+		}
+	}
+}
+
+func TestIsPinardMarker(t *testing.T) {
+	pinard := []string{
+		"<!-- pinard:conductor --> please fix the auth gap",
+		"pinard: some internal marker",
+	}
+	for _, s := range pinard {
+		if !isPinardMarker(s) {
+			t.Errorf("isPinardMarker(%q) = false, want true", s)
+		}
+	}
+
+	notPinard := []string{
+		"The security model relies on grant verification.",
+		"@memory: pty.out scoping constraint",
+	}
+	for _, s := range notPinard {
+		if isPinardMarker(s) {
+			t.Errorf("isPinardMarker(%q) = true, want false", s)
+		}
+	}
+}
+
+// TestMRMemory_ReviewNotesPreFilter verifies the sanitizeReviewNote logic
+// (mirrors what BuildMRMemoryPayload does internally after the line-granularity fix).
+func TestMRMemory_ReviewNotesPreFilter(t *testing.T) {
+	notes := []gitlab.Note{
+		{ID: 1, System: true, Body: "approved this merge request", Author: gitlab.Author{Username: "gitlab"}},
+		{ID: 2, Body: "LGTM", Author: gitlab.Author{Username: "reviewer"}},
+		{ID: 3, Body: "tests pass", Author: gitlab.Author{Username: "reviewer"}},
+		{ID: 4, Body: "pinard: internal pinard marker", Author: gitlab.Author{Username: "pinard"}},
+		// #5: pure marker line only — nothing survives
+		{ID: 5, Body: "<!-- pinard:conductor -->", Author: gitlab.Author{Username: "pinard"}},
+		{ID: 6, Body: "pty.out must be scoped per tenant — this is load-bearing security.", Author: gitlab.Author{Username: "reviewer"}},
+		{ID: 7, Body: "CI passed", Author: gitlab.Author{Username: "reviewer"}},
+		{ID: 8, Body: "@memory: grant verification must happen on every attach, not just connect.", Author: gitlab.Author{Username: "reviewer"}},
+		{ID: 9, Body: "rebased", Author: gitlab.Author{Username: "pinard"}},
+		// !364 scenario: conductor note with substantive body — marker line stripped, prose kept
+		{ID: 10, Body: "<!-- pinard:conductor -->\nDid a dedicated security pass — read-only integrity holds.", Author: gitlab.Author{Username: "pinard"}},
+	}
+
+	var reviewNotes []struct{ Author, Body string }
+	for _, note := range notes {
+		if note.System {
+			continue
+		}
+		body := strings.TrimSpace(note.Body)
+		clean := sanitizeReviewNote(body)
+		if clean == "" {
+			continue
+		}
+		reviewNotes = append(reviewNotes, struct{ Author, Body string }{note.Author.Username, clean})
+	}
+
+	// Notes 6, 8, 10 survive; #10 has its conductor marker line stripped.
+	if len(reviewNotes) != 3 {
+		t.Fatalf("expected 3 review notes after filtering, got %d: %+v", len(reviewNotes), reviewNotes)
+	}
+	if !strings.Contains(reviewNotes[0].Body, "pty.out") {
+		t.Errorf("first note should be the pty.out constraint, got %q", reviewNotes[0].Body)
+	}
+	if !strings.Contains(reviewNotes[1].Body, "grant verification") {
+		t.Errorf("second note should be the @memory: grant note, got %q", reviewNotes[1].Body)
+	}
+	if !strings.Contains(reviewNotes[2].Body, "security pass") {
+		t.Errorf("third note should be the security pass gem, got %q", reviewNotes[2].Body)
+	}
+	if strings.Contains(reviewNotes[2].Body, "pinard:conductor") {
+		t.Errorf("third note must not contain the conductor marker, got %q", reviewNotes[2].Body)
+	}
+}
+
+// TestSanitizeReviewNote covers the line-granularity stripping logic including the !364 scenarios.
+func TestSanitizeReviewNote(t *testing.T) {
+	tests := []struct {
+		name  string
+		body  string
+		want  string // "" means the note is fully dropped
+	}{
+		// Pure noise notes — fully dropped
+		{"pure LGTM", "LGTM", ""},
+		{"pure tests pass", "tests pass", ""},
+		{"pure CI passed", "CI passed", ""},
+		{"pure rebased", "rebased", ""},
+		{"pure thanks", "thanks.", ""},
+		{"pure merge when green", "merge when green", ""},
+		// Pure marker notes — fully dropped
+		{"pure webterm marker", "<!-- pinard:webterm-link -->", ""},
+		{"pure conductor marker", "<!-- pinard:conductor -->", ""},
+		{"pure pinard: prefix", "pinard: internal", ""},
+		// !364 note #2: conductor marker + substantive content on next line
+		{
+			"!364 note2: conductor+substance",
+			"<!-- pinard:conductor -->\nLooks good. **Notes from review:** pumpBytes is shared.",
+			"Looks good. **Notes from review:** pumpBytes is shared.",
+		},
+		// !364 note #4: the security gem
+		{
+			"!364 note4: security gem",
+			"<!-- pinard:conductor -->\nDid a dedicated security pass — no host-access/write path; read-only integrity holds.",
+			"Did a dedicated security pass — no host-access/write path; read-only integrity holds.",
+		},
+		// !364 note #3: substantive with inline noise phrase — phrase does NOT cause line drop
+		// because the whole line is not pure noise (it has other content)
+		{
+			"!364 note3: substantive with noise phrase",
+			"The responder tests pass — pumpBytes is a shared helper; rename would break contract.",
+			"The responder tests pass — pumpBytes is a shared helper; rename would break contract.",
+		},
+		// Mixed: marker line + noise line + substance line
+		{
+			"mixed marker+noise+substance",
+			"<!-- pinard:conductor -->\nLGTM\nThe grant bypass is a security hole.",
+			"The grant bypass is a security hole.",
+		},
+		// Purely substantive note — unchanged
+		{
+			"substantive unchanged",
+			"pty.out must be scoped per tenant in multi-tenant NATS.",
+			"pty.out must be scoped per tenant in multi-tenant NATS.",
+		},
+		// @memory: note — not a noise line, survives
+		{
+			"@memory: survives",
+			"@memory: grant must be verified on attach.",
+			"@memory: grant must be verified on attach.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeReviewNote(tt.body)
+			if got != tt.want {
+				t.Errorf("sanitizeReviewNote(%q) = %q, want %q", tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMRMemory_SourceContainsReviewNotes verifies review_notes is wired into the payload.
+func TestMRMemory_SourceContainsReviewNotes(t *testing.T) {
+	src, err := os.ReadFile("mrs.go")
+	if err != nil {
+		t.Skipf("cannot read mrs.go: %v", err)
+	}
+	content := string(src)
+	if !strings.Contains(content, "review_notes") {
+		t.Error("BuildMRMemoryPayload must include review_notes field in the payload")
+	}
+	if !strings.Contains(content, "publishMemoryLesson") {
+		t.Error("mrs.go must define publishMemoryLesson for @memory: handling")
 	}
 }

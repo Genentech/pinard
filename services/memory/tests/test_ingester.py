@@ -1564,6 +1564,7 @@ class TestMRIngestion:
         mock_surreal.get_ingest_cursor.return_value = 0
 
         with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
              patch("services.memory.ingester.TokenManager") as mock_tm_cls:
             mock_tm = MagicMock()
             mock_tm.get_client.return_value = mock_llm
@@ -1595,6 +1596,7 @@ class TestMRIngestion:
         mock_surreal.get_ingest_cursor.return_value = 0
 
         with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
              patch("services.memory.ingester.embed", return_value=[0.1] * 768):
             from services.memory.ingester import _handle_mr_sync
             mock_tm = MagicMock()
@@ -1631,6 +1633,7 @@ class TestMRIngestion:
         mock_surreal.get_ingest_cursor.return_value = 0
 
         with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
              patch("services.memory.ingester.embed", return_value=[0.1] * 768):
             from services.memory.ingester import _handle_mr_sync
             mock_tm = MagicMock()
@@ -1703,6 +1706,7 @@ class TestMRIngestion:
         mock_surreal.get_ingest_cursor.return_value = 0
 
         with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
              patch("services.memory.ingester.embed", return_value=[0.1] * 768):
             from services.memory.ingester import _handle_mr_sync
             mock_tm = MagicMock()
@@ -1724,13 +1728,14 @@ class TestMRIngestion:
         assert "manual_edit" in src
         assert "IF manual_edit" in src
 
-    def test_mr_discussion_not_ingested_v1(self) -> None:
-        """No discussion/review-notes route exists in the MR handler (v1)."""
+    def test_mr_review_notes_processed(self) -> None:
+        """Pass 2 review_notes are processed via _extract_entities_from_mr_review."""
         import inspect
         from services.memory import ingester as ingester_mod
         src = inspect.getsource(ingester_mod._handle_mr_sync)
-        assert "discussion" not in src.lower()
-        assert "review_note" not in src.lower()
+        # review_notes field must be checked in the sync handler (Phase 2).
+        assert "review_notes" in src
+        assert "_extract_entities_from_mr_review" in src
 
     def test_mr_files_not_embedded(self, registry: OntologyRegistry) -> None:
         """files_changed is stored in data, not in the embedded description."""
@@ -1755,6 +1760,7 @@ class TestMRIngestion:
             return [0.1] * 768
 
         with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
              patch("services.memory.ingester.embed", side_effect=capture_embed):
             from services.memory.ingester import _handle_mr_sync
             mock_tm = MagicMock()
@@ -1764,3 +1770,384 @@ class TestMRIngestion:
         # files_changed must not appear in any embedded text
         for text in embedded_texts:
             assert "recall_service.py" not in text
+
+
+# ── Pass 2 review delta pass tests ───────────────────────────────────────────
+
+class TestMRReviewIngestion:
+    """Tests for Pass-2 MR review delta pass extraction (§9)."""
+
+    def _mr_payload_with_review(self, review_notes=None, **overrides) -> dict:
+        base = {
+            "source": "mr",
+            "project": "exohub/pinard",
+            "repo": "exohub/pinard",
+            "iid": 364,
+            "scope": "pinard",
+            "title": "feat(webterm): aoc attach read-only PTY viewer",
+            "description": "Implemented read-only PTY viewer via tmux attach -r over NATS.",
+            "issues": [{"iid": 65, "title": "web terminal", "description": "Browser view of tmux."}],
+            "files_changed": ["internal/webterm/responder.go"],
+            "merged_at": "2026-08-28T12:00:00Z",
+            "author": "pinard-bot",
+            "url": "https://example.com/exohub/pinard/-/merge_requests/364",
+            "review_notes": review_notes or [],
+        }
+        base.update(overrides)
+        return base
+
+    def test_pass2_signposted_constraint_yields_entity(self, registry: OntologyRegistry) -> None:
+        """A signposted constraint in review notes → net-new entity with provenance=mr-review."""
+        review_notes = [
+            {
+                "author": "lelongs",
+                "body": "pty.out is not scoped per tenant; in multi-tenant (#28/#29) it MUST be scoped in per-tenant NATS account permissions.",
+            }
+        ]
+        payload = self._mr_payload_with_review(review_notes=review_notes)
+
+        # Pass 1: LLM returns a decision about the PTY viewer approach.
+        # Pass 2: LLM returns the net-new multi-tenant constraint.
+        call_count = 0
+        def llm_complete(messages, max_tokens=1024):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Pass 1 response
+                return json.dumps({
+                    "entities": [{
+                        "role": "decision",
+                        "name": "read-only PTY viewer via tmux attach -r",
+                        "description": "Attach read-only using tmux attach -r; no stdin.",
+                    }]
+                })
+            else:
+                # Pass 2 response
+                return json.dumps({
+                    "entities": [{
+                        "role": "artifact",
+                        "name": "pty.out multi-tenant scoping constraint",
+                        "description": "pty.out must be scoped in per-tenant NATS account permissions in multi-tenant deployments.",
+                        "why_durable": "Security constraint not present in Pass 1; load-bearing for multi-tenant isolation.",
+                    }]
+                })
+
+        mock_llm = MagicMock()
+        mock_llm.complete.side_effect = llm_complete
+
+        mock_surreal = MagicMock()
+        mock_surreal.__enter__ = MagicMock(return_value=mock_surreal)
+        mock_surreal.__exit__ = MagicMock(return_value=False)
+        mock_surreal.fetch_entity_by_role_name.return_value = None
+        mock_surreal.get_ingest_cursor.return_value = 0
+
+        upserted = []
+        def capture_upsert(**kwargs):
+            upserted.append(kwargs)
+        mock_surreal.upsert_entity.side_effect = capture_upsert
+
+        with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
+             patch("services.memory.ingester.embed", return_value=[0.1] * 768):
+            from services.memory.ingester import _handle_mr_sync
+            mock_tm = MagicMock()
+            mock_tm.get_client.return_value = mock_llm
+            result = _handle_mr_sync(payload, registry, mock_tm)
+
+        assert result == "ok"
+        # Both Pass 1 and Pass 2 should have written an entity.
+        assert len(upserted) == 2, f"expected 2 entities, got {len(upserted)}: {upserted}"
+        provenances = {e["provenance"] for e in upserted}
+        assert "mr" in provenances
+        assert "mr-review" in provenances
+
+    def test_pass2_noise_only_review_yields_zero(self, registry: OntologyRegistry) -> None:
+        """Noise-only review notes → Pass 2 yields zero entities."""
+        review_notes = [
+            {"author": "reviewer", "body": "LGTM"},
+            {"author": "reviewer", "body": "Tests pass"},
+            {"author": "pinard", "body": "pushed a commit"},
+        ]
+        payload = self._mr_payload_with_review(review_notes=review_notes)
+
+        call_count = 0
+        def llm_complete(messages, max_tokens=1024):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return json.dumps({"entities": []})
+            else:
+                # Pass 2 should not be called because review_notes are noise
+                # (but if it is called, return empty)
+                return json.dumps({"entities": []})
+
+        mock_llm = MagicMock()
+        mock_llm.complete.side_effect = llm_complete
+
+        mock_surreal = MagicMock()
+        mock_surreal.__enter__ = MagicMock(return_value=mock_surreal)
+        mock_surreal.__exit__ = MagicMock(return_value=False)
+        mock_surreal.fetch_entity_by_role_name.return_value = None
+        mock_surreal.get_ingest_cursor.return_value = 0
+
+        with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
+             patch("services.memory.ingester.embed", return_value=[0.1] * 768):
+            from services.memory.ingester import _handle_mr_sync
+            mock_tm = MagicMock()
+            mock_tm.get_client.return_value = mock_llm
+            result = _handle_mr_sync(payload, registry, mock_tm)
+
+        assert result == "ok"
+        mock_surreal.upsert_entity.assert_not_called()
+
+    def test_pass2_no_review_notes_skips_pass2(self, registry: OntologyRegistry) -> None:
+        """Empty review_notes → Pass 2 is not run at all (LLM called only once)."""
+        payload = self._mr_payload_with_review(review_notes=[])
+
+        mock_llm = MagicMock()
+        mock_llm.complete.return_value = json.dumps({"entities": []})
+
+        mock_surreal = MagicMock()
+        mock_surreal.__enter__ = MagicMock(return_value=mock_surreal)
+        mock_surreal.__exit__ = MagicMock(return_value=False)
+        mock_surreal.fetch_entity_by_role_name.return_value = None
+        mock_surreal.get_ingest_cursor.return_value = 0
+
+        with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
+             patch("services.memory.ingester.embed", return_value=[0.1] * 768):
+            from services.memory.ingester import _handle_mr_sync
+            mock_tm = MagicMock()
+            mock_tm.get_client.return_value = mock_llm
+            result = _handle_mr_sync(payload, registry, mock_tm)
+
+        assert result == "ok"
+        # Only Pass 1 should have called the LLM.
+        assert mock_llm.complete.call_count == 1, \
+            f"LLM should be called once (Pass 1 only), was called {mock_llm.complete.call_count} time(s)"
+
+    def test_pass2_does_not_duplicate_pass1_entities(self, registry: OntologyRegistry) -> None:
+        """Entity already captured by Pass 1 → not duplicated by Pass 2."""
+        review_notes = [
+            {
+                "author": "reviewer",
+                "body": "Great, the distance gate approach is solid.",
+            }
+        ]
+        payload = self._mr_payload_with_review(review_notes=review_notes)
+
+        call_count = 0
+        def llm_complete(messages, max_tokens=1024):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Pass 1 captures the distance gate decision.
+                return json.dumps({
+                    "entities": [{
+                        "role": "decision",
+                        "name": "distance gate over reranker",
+                        "description": "Chose distance gate for simplicity and latency.",
+                    }]
+                })
+            else:
+                # Pass 2 returns the same entity (LLM didn't filter).
+                return json.dumps({
+                    "entities": [{
+                        "role": "decision",
+                        "name": "distance gate over reranker",
+                        "description": "Chose distance gate for simplicity and latency.",
+                        "why_durable": "Core design decision.",
+                    }]
+                })
+
+        mock_llm = MagicMock()
+        mock_llm.complete.side_effect = llm_complete
+
+        mock_surreal = MagicMock()
+        mock_surreal.__enter__ = MagicMock(return_value=mock_surreal)
+        mock_surreal.__exit__ = MagicMock(return_value=False)
+        mock_surreal.fetch_entity_by_role_name.return_value = None
+        mock_surreal.get_ingest_cursor.return_value = 0
+
+        upserted = []
+        mock_surreal.upsert_entity.side_effect = lambda **kw: upserted.append(kw)
+
+        with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
+             patch("services.memory.ingester.embed", return_value=[0.1] * 768):
+            from services.memory.ingester import _handle_mr_sync
+            mock_tm = MagicMock()
+            mock_tm.get_client.return_value = mock_llm
+            result = _handle_mr_sync(payload, registry, mock_tm)
+
+        assert result == "ok"
+        # Only one entity should be written (the Pass 1 one; Pass 2 deduplicates).
+        assert len(upserted) == 1, \
+            f"expected 1 entity (no Pass-2 duplication), got {len(upserted)}: {upserted}"
+        assert upserted[0]["provenance"] == "mr"
+
+    def test_pass2_unjustified_entity_dropped(self, registry: OntologyRegistry) -> None:
+        """Pass 2 entity without why_durable justification → dropped."""
+        review_notes = [{"author": "reviewer", "body": "This is load-bearing."}]
+        payload = self._mr_payload_with_review(review_notes=review_notes)
+
+        call_count = 0
+        def llm_complete(messages, max_tokens=1024):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return json.dumps({"entities": []})
+            else:
+                # Pass 2 returns an entity WITHOUT why_durable.
+                return json.dumps({
+                    "entities": [{
+                        "role": "decision",
+                        "name": "some decision",
+                        "description": "Something.",
+                        # no why_durable field
+                    }]
+                })
+
+        mock_llm = MagicMock()
+        mock_llm.complete.side_effect = llm_complete
+
+        mock_surreal = MagicMock()
+        mock_surreal.__enter__ = MagicMock(return_value=mock_surreal)
+        mock_surreal.__exit__ = MagicMock(return_value=False)
+        mock_surreal.fetch_entity_by_role_name.return_value = None
+        mock_surreal.get_ingest_cursor.return_value = 0
+
+        with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
+             patch("services.memory.ingester.embed", return_value=[0.1] * 768):
+            from services.memory.ingester import _handle_mr_sync
+            mock_tm = MagicMock()
+            mock_tm.get_client.return_value = mock_llm
+            result = _handle_mr_sync(payload, registry, mock_tm)
+
+        assert result == "ok"
+        mock_surreal.upsert_entity.assert_not_called()
+
+    def test_pass2_provenance_is_mr_review(self, registry: OntologyRegistry) -> None:
+        """Pass 2 entities get provenance='mr-review'."""
+        review_notes = [{"author": "reviewer", "body": "Critical constraint: grants must be verified on attach, not just connect."}]
+        payload = self._mr_payload_with_review(review_notes=review_notes)
+
+        call_count = 0
+        def llm_complete(messages, max_tokens=1024):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return json.dumps({"entities": []})
+            else:
+                return json.dumps({
+                    "entities": [{
+                        "role": "artifact",
+                        "name": "grant verified on every attach",
+                        "description": "NATS grant must be verified on every tmux attach, not only at connection time.",
+                        "why_durable": "Security invariant not captured in Pass 1.",
+                    }]
+                })
+
+        mock_llm = MagicMock()
+        mock_llm.complete.side_effect = llm_complete
+
+        mock_surreal = MagicMock()
+        mock_surreal.__enter__ = MagicMock(return_value=mock_surreal)
+        mock_surreal.__exit__ = MagicMock(return_value=False)
+        mock_surreal.fetch_entity_by_role_name.return_value = None
+        mock_surreal.get_ingest_cursor.return_value = 0
+
+        upserted = []
+        mock_surreal.upsert_entity.side_effect = lambda **kw: upserted.append(kw)
+
+        with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
+             patch("services.memory.ingester.embed", return_value=[0.1] * 768):
+            from services.memory.ingester import _handle_mr_sync
+            mock_tm = MagicMock()
+            mock_tm.get_client.return_value = mock_llm
+            result = _handle_mr_sync(payload, registry, mock_tm)
+
+        assert result == "ok"
+        assert len(upserted) == 1
+        assert upserted[0]["provenance"] == "mr-review"
+
+    def test_pass2_full_note_body_not_truncated(self, registry: OntologyRegistry) -> None:
+        """Pass 2 must pass full note bodies — no per-note body[:500] truncation."""
+        # Construct a note body longer than 500 chars; the key constraint is at offset ~600.
+        padding = "a" * 520
+        key_text = "CRITICAL: per-tenant ACL must scope pty.out in multi-tenant NATS accounts."
+        long_body = padding + key_text
+        review_notes = [{"author": "reviewer", "body": long_body}]
+        payload = self._mr_payload_with_review(review_notes=review_notes)
+
+        received_prompts = []
+        call_count = 0
+        def llm_complete(messages, max_tokens=4096):
+            nonlocal call_count
+            call_count += 1
+            received_prompts.append(messages[0]["content"])
+            return json.dumps({"entities": []})
+
+        mock_llm = MagicMock()
+        mock_llm.complete.side_effect = llm_complete
+
+        mock_surreal = MagicMock()
+        mock_surreal.__enter__ = MagicMock(return_value=mock_surreal)
+        mock_surreal.__exit__ = MagicMock(return_value=False)
+        mock_surreal.fetch_entity_by_role_name.return_value = None
+        mock_surreal.get_ingest_cursor.return_value = 0
+
+        with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
+             patch("services.memory.ingester.embed", return_value=[0.1] * 768):
+            from services.memory.ingester import _handle_mr_sync
+            mock_tm = MagicMock()
+            mock_tm.get_client.return_value = mock_llm
+            _handle_mr_sync(payload, registry, mock_tm)
+
+        # Pass 2 prompt (second call) must contain the text beyond offset 500.
+        assert call_count >= 2, "Pass 2 was not called"
+        pass2_prompt = received_prompts[1]
+        assert key_text in pass2_prompt, (
+            f"Pass 2 prompt missing text beyond offset 500; body was truncated. "
+            f"Looked for: {key_text!r}"
+        )
+
+    def test_pass2_review_max_chars_cap_warns(self, registry: OntologyRegistry) -> None:
+        """MEMORY_MR_REVIEW_MAX_CHARS triggers a warning when exceeded."""
+        # Single note exceeding the cap.
+        giant_body = "x" * 100_000
+        review_notes = [{"author": "bot", "body": giant_body}]
+        payload = self._mr_payload_with_review(review_notes=review_notes)
+
+        mock_llm = MagicMock()
+        mock_llm.complete.return_value = json.dumps({"entities": []})
+
+        mock_surreal = MagicMock()
+        mock_surreal.__enter__ = MagicMock(return_value=mock_surreal)
+        mock_surreal.__exit__ = MagicMock(return_value=False)
+        mock_surreal.fetch_entity_by_role_name.return_value = None
+        mock_surreal.get_ingest_cursor.return_value = 0
+
+        with patch("services.memory.ingester.SurrealClient", return_value=mock_surreal), \
+             patch("services.memory.ingester.build_llm_client", return_value=mock_llm), \
+             patch("services.memory.ingester.embed", return_value=[0.1] * 768), \
+             patch("services.memory.ingester.MEMORY_MR_REVIEW_MAX_CHARS", 1000), \
+             patch("services.memory.ingester.logger") as mock_logger:
+            from services.memory.ingester import _handle_mr_sync
+            mock_tm = MagicMock()
+            mock_tm.get_client.return_value = mock_llm
+            _handle_mr_sync(payload, registry, mock_tm)
+
+        # The warning must fire because total text exceeds the cap.
+        warning_calls = [
+            str(c) for c in mock_logger.warning.call_args_list
+            if "exceed" in str(c).lower() or "truncat" in str(c).lower()
+        ]
+        assert warning_calls, (
+            f"Expected a truncation warning when review notes exceed "
+            f"MEMORY_MR_REVIEW_MAX_CHARS, got: {mock_logger.warning.call_args_list}"
+        )

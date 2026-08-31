@@ -30,6 +30,10 @@ Environment variables:
     MEMORY_TOKEN_URL        — Pour-token URL (used when MEMORY_LLM_AUTH=url or auto)
     ANTHROPIC_API_KEY       — Direct Anthropic key (MEMORY_LLM_AUTH=static-key)
     MEMORY_EXTRACTION_MODEL — Extraction model (legacy; use MEMORY_LLM_MODEL)
+    MEMORY_MR_REVIEW_MAX_CHARS — Safety-valve cap on total review-notes text sent to Pass 2
+                              (default: 48000 chars ≈ 12k tokens). Normal reviews are never
+                              truncated; only pathological outliers (e.g. pasted logs) hit it.
+                              A warning is logged when the cap fires.
     ENGRAM_URL          — Engram API URL (default: http://localhost:7437)
     ENGRAM_SINCE_HOURS  — Observation look-back window (default: 168)
     MEMORY_ENGRAM_SOURCE — 'http' (default, local dev) or 'postgres' (EKS / cloud RDS direct read)
@@ -71,7 +75,7 @@ from .engram_postgres_reader import (
     EngramPostgresReaderError,
     list_projects as list_engram_projects,
 )
-from .llm_client import LLMAuthError, LLMClient
+from .llm_client import LLMAuthError, LLMClient, build_llm_client
 from .ontology.registry import OntologyRegistry
 from .surrealdb.client import SCHEMA_PATH, SurrealClient, SurrealError
 from .token_manager import LLMUnavailable, TokenManager
@@ -85,6 +89,10 @@ VIGNOBLE_LOGS = Path(os.environ.get("VIGNOBLE_LOGS", "./logs"))
 _llm_model_env = os.environ.get("MEMORY_LLM_MODEL", "")
 EXTRACTION_MODEL = _llm_model_env or os.environ.get(
     "MEMORY_EXTRACTION_MODEL", "claude-haiku-4-5-20251001"
+)
+# Safety-valve cap for MR Pass 2 review-notes text (not a routine limiter).
+MEMORY_MR_REVIEW_MAX_CHARS: int = int(
+    os.environ.get("MEMORY_MR_REVIEW_MAX_CHARS", "48000")
 )
 
 MEMORY_ENGRAM_SOURCE: str = os.environ.get("MEMORY_ENGRAM_SOURCE", "http")
@@ -451,10 +459,11 @@ def _extract_entities_from_mr(
     group_id: str,
     registry: "OntologyRegistry",
     surreal: "SurrealClient",
-) -> int:
+) -> tuple[int, list[dict]]:
     """Extract durable entities from an MR memory payload using an MR-specific prompt.
 
-    Returns the count of entities written. Raises LLMAuthError on auth failure.
+    Returns (count_written, entities_list) where entities_list carries the
+    emitted entities for use as Pass 2 context.  Raises LLMAuthError on auth failure.
     Each entity is embedded and upserted with provenance="mr" as a single unit (no chunking).
     """
     import re as _re
@@ -489,23 +498,23 @@ def _extract_entities_from_mr(
 
     text = llm_client.complete(
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=1024,
+        max_tokens=4096,
     ) or "{}"
 
     match = _re.search(r"\{.*\}", text, _re.DOTALL)
     if not match:
         logger.info("MR extraction: LLM returned no JSON for %s (zero entities)", mr_key)
-        return 0
+        return 0, []
 
     try:
         data = json.loads(match.group(0))
     except json.JSONDecodeError as exc:
         logger.warning("MR extraction: JSON parse error for %s: %s", mr_key, exc)
-        return 0
+        return 0, []
 
     entities = data.get("entities", [])
     if not entities:
-        return 0
+        return 0, []
 
     allowed_roles = {"decision", "artifact", "diagnosis"}
     issue_iids = [iss.get("iid") for iss in issues if iss.get("iid")]
@@ -518,6 +527,7 @@ def _extract_entities_from_mr(
     }
 
     count = 0
+    written_entities: list[dict] = []
     for ent in entities:
         role = ent.get("role", "").strip()
         name = ent.get("name", "").strip()
@@ -545,6 +555,7 @@ def _extract_entities_from_mr(
             provenance="mr",
         )
         count += 1
+        written_entities.append({"role": role, "name": name, "description": description})
 
         # Create supersedes edge if an older entity existed with a different provenance
         # or from a prior MR (same role+name = same deterministic id, so the old content
@@ -578,6 +589,208 @@ def _extract_entities_from_mr(
             except Exception as exc:
                 logger.debug("MR extraction: supersedes edge failed for %s: %s", name, exc)
 
+    return count, written_entities
+
+
+# ── MR knowledge ingestion (Pass 2: review delta pass) ───────────────────────
+
+_MR_REVIEW_EXTRACTION_PROMPT = """\
+You are reviewing an MR's discussion notes. The following decisions have already been
+captured from the MR description and linked issues (Pass 1):
+
+{pass1_entities}
+
+Now read the pre-filtered review notes below. Your task is narrow:
+> Is there any **new, durable** decision or constraint in the review that is **not
+> already covered** by the Pass 1 entities above?
+> If not — **or if you are in any doubt** — **return no entities.**
+> A zero-entity result is the expected default.
+
+**IMPORTANT — capture forward-looking constraints.**
+If a reviewer flags something as "worth noting for the future", "note to record",
+"not blocking this MR but must hold in a later change/epic", or equivalent — that
+constraint IS durable knowledge and MUST be captured, even if it was not enacted in
+this MR. A future-directed invariant is more valuable than a past decision.
+
+For each item you do emit, you MUST include a brief `why_durable` justification
+(one sentence) explaining why it is durable knowledge not already captured.
+`why_durable` must describe a decision, rationale, or constraint — NOT that code
+was reorganised. If the only reason an item is noteworthy is that a helper was
+extracted, a function renamed, or a signature changed (with no accompanying
+rationale or constraint), drop it — it is not durable knowledge.
+
+Extract only:
+- `decision` — a durable architectural/design choice;
+- `artifact` — a durable structural constraint or fact;
+- `diagnosis` — a root-cause/fix pair.
+
+Ignore: process chatter, LGTM, CI, approvals, "please rebase", style nits,
+and anything that restates what is already in Pass 1.
+
+--- Example (domain-neutral) ---
+Review note: "@reviewer: the in-process cache works fine at this scale, but I want
+to note for the future: if this service is ever deployed as multiple instances the
+cache must move to a shared store (Redis/Memcached) or reads will be stale. Not
+blocking this MR."
+
+Correct extraction:
+  role: artifact
+  name: In-process cache requires shared store under horizontal scaling
+  description: The current in-process cache is only correct for single-instance
+    deployments; scaling to multiple instances requires migrating to a shared cache
+    (e.g. Redis) to prevent stale reads.
+  why_durable: Forward-looking invariant — a constraint that must hold in any future
+    scale-out change, flagged explicitly by the reviewer as a note for the future.
+--- End example ---
+
+Review notes:
+{review_notes_text}
+
+Return a JSON object:
+  {{"entities": [{{"role": str, "name": str, "description": str, "why_durable": str}}]}}
+Return no entities if there is nothing net-new and durable.
+"""
+
+
+def _extract_entities_from_mr_review(
+    llm_client: "LLMClient",
+    mr_payload: dict,
+    pass1_entities: list[dict],
+    group_id: str,
+    registry: "OntologyRegistry",
+    surreal: "SurrealClient",
+) -> int:
+    """Pass 2: extract net-new durable entities from pre-filtered review notes.
+
+    Given the Pass 1 entities as context, runs a delta LLM prompt over the
+    pre-filtered review notes in the payload.  Returns the count of entities
+    written.  Raises LLMAuthError on auth failure.
+
+    Entities are tagged provenance="mr-review" with lower confidence.
+    """
+    import re as _re
+
+    review_notes = mr_payload.get("review_notes", [])
+    if not review_notes:
+        return 0
+
+    project = mr_payload.get("project", "")
+    iid = mr_payload.get("iid", 0)
+    mr_key = f"{project}!{iid}"
+    files_changed = mr_payload.get("files_changed", [])
+    merged_at = mr_payload.get("merged_at", "")
+    url = mr_payload.get("url", "")
+    issues = mr_payload.get("issues", [])
+    issue_iids = [iss.get("iid") for iss in issues if iss.get("iid")]
+
+    # Format Pass 1 context.
+    if pass1_entities:
+        p1_lines = [
+            f"- [{e.get('role','')}] {e.get('name','')}: {e.get('description','')[:150]}"
+            for e in pass1_entities
+        ]
+        pass1_text = "\n".join(p1_lines)
+    else:
+        pass1_text = "(none — Pass 1 yielded zero entities)"
+
+    # Format review notes. Notes are pre-filtered by sanitizeReviewNote — curated
+    # prose, not diffs. No per-note truncation. A generous safety-valve cap
+    # (MEMORY_MR_REVIEW_MAX_CHARS, default 48000) prevents pathological outliers
+    # from ballooning the prompt; a warning fires if it actually triggers.
+    note_lines = []
+    for n in review_notes:
+        author = n.get("author", "") if isinstance(n, dict) else ""
+        body = n.get("body", "") if isinstance(n, dict) else str(n)
+        note_lines.append(f"@{author}: {body}")
+    review_notes_text = "\n".join(note_lines)
+    if len(review_notes_text) > MEMORY_MR_REVIEW_MAX_CHARS:
+        logger.warning(
+            "MR review extraction: review notes for %s exceed %d chars (%d); truncating.",
+            mr_key, MEMORY_MR_REVIEW_MAX_CHARS, len(review_notes_text),
+        )
+        review_notes_text = review_notes_text[:MEMORY_MR_REVIEW_MAX_CHARS]
+
+    prompt = _MR_REVIEW_EXTRACTION_PROMPT.format(
+        pass1_entities=pass1_text,
+        review_notes_text=review_notes_text,
+    )
+
+    text = llm_client.complete(
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=4096,
+    ) or "{}"
+
+    match = _re.search(r"\{.*\}", text, _re.DOTALL)
+    if not match:
+        logger.info("MR review extraction: LLM returned no JSON for %s (zero net-new entities)", mr_key)
+        return 0
+
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        logger.warning("MR review extraction: JSON parse error for %s: %s", mr_key, exc)
+        return 0
+
+    entities = data.get("entities", [])
+    if not entities:
+        return 0
+
+    allowed_roles = {"decision", "artifact", "diagnosis"}
+    entity_data = {
+        "mr": mr_key,
+        "issues": issue_iids,
+        "url": url,
+        "merged_at": merged_at,
+        "files_changed": files_changed,
+    }
+
+    # Build a set of (role, name) already captured in Pass 1 to prevent duplication.
+    pass1_names = {(e.get("role", ""), e.get("name", "")) for e in pass1_entities}
+
+    count = 0
+    for ent in entities:
+        role = ent.get("role", "").strip()
+        name = ent.get("name", "").strip()
+        description = ent.get("description", "").strip()
+        why_durable = ent.get("why_durable", "").strip()
+
+        if not name or role not in allowed_roles:
+            continue
+        # Require a why_durable justification — drop unjustified items.
+        if not why_durable:
+            logger.debug(
+                "MR review extraction: dropping unjustified entity for %s: role=%s name=%r",
+                mr_key, role, name,
+            )
+            continue
+        # Skip items already captured by Pass 1.
+        if (role, name) in pass1_names:
+            logger.debug(
+                "MR review extraction: skipping Pass-1 duplicate for %s: role=%s name=%r",
+                mr_key, role, name,
+            )
+            continue
+
+        try:
+            vector = embed(f"{name}: {description}")
+        except EmbeddingError as exc:
+            logger.warning("MR review extraction: embedding failed for %s/%s: %s", mr_key, name, exc)
+            vector = None
+
+        surreal.upsert_entity(
+            role=role,
+            name=name,
+            description=description,
+            data=entity_data,
+            embedding=vector,
+            provenance="mr-review",
+        )
+        count += 1
+
+    if count:
+        logger.info("MR review extraction: %s yielded %d net-new entity(ies)", mr_key, count)
+    else:
+        logger.debug("MR review extraction: %s — no net-new durable entities", mr_key)
     return count
 
 
@@ -611,16 +824,16 @@ def _handle_mr_sync(
                 logger.info("MR ingester: %s already processed, skipping", mr_key)
                 return "ok"
 
-            # Acquire LLM client.
+            # Acquire LLM client (availability gate via token_manager).
             try:
                 llm_client = token_manager.get_client()
             except LLMUnavailable as exc:
                 logger.warning("MR ingester: LLM unavailable for %s: %s", mr_key, exc)
                 return "llm_unavailable"
 
-            # Extract entities.
+            # Pass 1: extract durable entities from MR description + issues.
             try:
-                n_entities = _extract_entities_from_mr(
+                n_pass1, pass1_entities = _extract_entities_from_mr(
                     llm_client=llm_client,
                     mr_payload=payload,
                     group_id=group_id,
@@ -634,13 +847,32 @@ def _handle_mr_sync(
                 logger.error("MR ingester: extraction error for %s: %s", mr_key, exc)
                 return "error"
 
+            # Pass 2: review delta pass (net-new entities from pre-filtered notes).
+            n_pass2 = 0
+            review_notes = payload.get("review_notes", [])
+            if review_notes:
+                try:
+                    n_pass2 = _extract_entities_from_mr_review(
+                        llm_client=llm_client,
+                        mr_payload=payload,
+                        pass1_entities=pass1_entities,
+                        group_id=group_id,
+                        registry=registry,
+                        surreal=surreal,
+                    )
+                except LLMAuthError as exc:
+                    logger.warning("MR ingester: LLM auth error (Pass 2) for %s: %s", mr_key, exc)
+                    # Pass 1 already succeeded; don't nak — log and continue.
+                except Exception as exc:
+                    logger.error("MR ingester: Pass 2 extraction error for %s: %s", mr_key, exc)
+
             # Mark as processed (seq=1 = done).
             cursor_store.update(mr_key, 1)
 
             mr_title = payload.get("title", "")
             logger.info(
-                "MR ingester: processed %s (%r) entities=%d",
-                mr_key, mr_title[:60], n_entities,
+                "MR ingester: processed %s (%r) pass1=%d pass2=%d",
+                mr_key, mr_title[:60], n_pass1, n_pass2,
             )
             return "ok"
 

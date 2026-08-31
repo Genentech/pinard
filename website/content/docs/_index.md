@@ -1,7 +1,7 @@
 ---
 title: Documentation
-ledger_synced_commit: 1eff360b88b37f55c8ceb737c77e29c720809d24
-ledger_synced_at: 2026-08-29
+ledger_synced_commit: 8752c456c0d3e7fa172c7e716f3664a01fd99b09
+ledger_synced_at: 2026-08-31
 ---
 
 ## Orchestrate fleets of agents — reliably

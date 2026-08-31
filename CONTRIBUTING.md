@@ -76,6 +76,51 @@ Contributions must be made under the project's license. We use the
 your commits with `git commit -s`, which adds a `Signed-off-by` trailer
 certifying you have the right to submit the work under the MIT License.
 
+## Updating the public mirror
+
+Pinard is developed on an internal source-of-truth and mirrored to
+`github.com/Genentech/pinard` as a **freshly-scrubbed snapshot** (we never push
+internal git history — it contains credentials and internal hostnames).
+
+### Workflow
+
+Use `scripts/sync-public.sh` (internal only — not present in the public repo):
+
+```bash
+# 1. Have a local clone of the public repo ready.
+git clone https://github.com/Genentech/pinard.git /path/to/public-clone
+
+# 2. From inside the internal repo, run the helper.
+scripts/sync-public.sh --public-dir /path/to/public-clone [--ref origin/master]
+
+# 3. Review the staged diff in the public clone, then push.
+git -C /path/to/public-clone push
+```
+
+Or in one step with auto-push:
+
+```bash
+scripts/sync-public.sh --public-dir /path/to/public-clone --push --yes
+```
+
+The script runs `export-oss.sh` → `verify-oss.sh` (aborts if either fails) →
+`rsync --delete` (propagating deletions, preserving `.git` and the `deps/babysitter`
+submodule) → `git commit -s` stamped with the internal short SHA. Pass `--dry-run`
+to preview the rsync diff without committing.
+
+### Porting external pull requests back to internal master
+
+Public GitHub PRs must be **ported into internal `master`** before merging — never
+merged directly into the public repo. The next sync would otherwise clobber those
+commits (the mirror is always a full snapshot, not a patch stack).
+
+Workflow:
+1. Download the PR diff (`gh pr diff <number> > patch.diff` or similar).
+2. Apply it to a branch off internal `master`: `git apply patch.diff`.
+3. Review, adjust if needed, and open an internal MR targeting `master`.
+4. Once the internal MR is merged, the next `sync-public.sh` run will include
+   the change in the public mirror automatically.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the

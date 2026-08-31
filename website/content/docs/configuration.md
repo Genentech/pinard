@@ -264,6 +264,11 @@ memory:
     sshHost: ""         # SSH hostname for vignoble git clones (sets GITLAB_SSH_HOST in the pod).
                         # Required when your GitLab SSH endpoint differs from its API hostname
                         # (e.g. "ssh.gitlab.com"). Must be set explicitly in custom-<env>.yaml.
+    sshKnownHosts: ""   # known_hosts entry for sshHost, e.g.:
+                        #   "ssh.gitlab.example.com ssh-ed25519 AAAA..."
+                        # Required when sshHost is set — the init-container writes this
+                        # into ~/.ssh/known_hosts before cloning.
+    gitEmail: "pinard@example.com"  # git author/committer email used by wiki clone jobs
   vignes:
     data: ""            # Raw vignes.yaml content for the ScopeRollupEngine.
                         # Superseded when VIGNOBLES_BASE_DIR is set (see below).

@@ -22,6 +22,11 @@ import (
 // invisibly in GitLab and is stripped before the note reaches the worker.
 const conductorMarker = "<!-- pinard:conductor -->"
 
+// memoryMarkerPrefix is the @memory: review-note marker (§10). A reviewer can
+// prefix a note with this string to route its text directly into the /lesson
+// pipeline — high-precision, no LLM classification needed.
+const memoryMarkerPrefix = "@memory:"
+
 type MRWatcher struct {
 	State       *state.Store[state.MRWatcherState]
 	IssueState  *state.Store[state.IssueWatcherState]
@@ -664,6 +669,11 @@ func (w *MRWatcher) forwardNotes(sessionName string, entry *state.WatchedMR) {
 			"file":          note.Position.NewPath,
 			"line":          note.Position.NewLine,
 		})
+
+		// §10 @memory: marker — route to the /lesson pipeline immediately.
+		if content := extractMemoryMarker(body); content != "" {
+			w.publishMemoryLesson(entry.Project, content)
+		}
 	}
 
 	message := strings.Join(parts, "\n")
@@ -916,9 +926,140 @@ var mrMemorySkipPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^Revert `),
 }
 
-// shouldPublishMRMemory returns true if the MR should produce a memory event.
+// mrReviewNoisePatterns match review notes that carry no durable knowledge:
+// pure process chatter (LGTM, CI, pushed, rebase, merge-when-green).
+var mrReviewNoisePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^\s*(lgtm|looks good( to me)?|ship it|\+1|👍|❤|✅)\s*$`),
+	regexp.MustCompile(`(?i)\btests? pass(ed)?\b`),
+	regexp.MustCompile(`(?i)\b(ci|pipeline) (pass(ed)?|success)\b`),
+	regexp.MustCompile(`(?i)\bpush(ed)? (a )?commit\b`),
+	regexp.MustCompile(`(?i)\brebase(d)?\b`),
+	regexp.MustCompile(`(?i)\bmerge (when|once) (green|ready|CI)\b`),
+	regexp.MustCompile(`(?i)^\s*thanks?[.!]?\s*$`),
+}
+
+// isReviewNoise returns true if the note body is pure process chatter with no
+// durable knowledge value (LGTM / CI / rebase / merge-when-green).
+func isReviewNoise(body string) bool {
+	for _, re := range mrReviewNoisePatterns {
+		if re.MatchString(body) {
+			return true
+		}
+	}
+	return false
+}
+
+// isPinardMarker returns true if the note body starts with a pinard internal
+// marker (e.g. conductor direction or webterm link) that should not be ingested
+// as review knowledge.
+func isPinardMarker(body string) bool {
+	return strings.Contains(body, conductorMarker) ||
+		strings.Contains(body, "<!-- pinard:") ||
+		strings.HasPrefix(strings.TrimSpace(body), "pinard:")
+}
+
+// mrReviewNoiseLinePatterns are anchored variants of mrReviewNoisePatterns for
+// line-level filtering inside sanitizeReviewNote. They match only when the
+// trimmed line is entirely noise (no surrounding substantive content).
+var mrReviewNoiseLinePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^\s*(lgtm|looks good( to me)?|ship it|\+1|👍|❤|✅)\s*$`),
+	regexp.MustCompile(`(?i)^\s*tests? pass(ed)?[.!]?\s*$`),
+	regexp.MustCompile(`(?i)^\s*(ci|pipeline) (pass(ed)?|success)[.!]?\s*$`),
+	regexp.MustCompile(`(?i)^\s*push(ed)? (a )?commit[.!]?\s*$`),
+	regexp.MustCompile(`(?i)^\s*rebase(d)?[.!]?\s*$`),
+	regexp.MustCompile(`(?i)^\s*merge (when|once) (green|ready|CI)[.!]?\s*$`),
+	regexp.MustCompile(`(?i)^\s*thanks?[.!]?\s*$`),
+}
+
+// isNoiseLine returns true if the trimmed line is entirely process chatter.
+func isNoiseLine(line string) bool {
+	for _, re := range mrReviewNoiseLinePatterns {
+		if re.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// sanitizeReviewNote strips marker and noise lines from a review note body and
+// returns the surviving prose. Lines dropped are: HTML comments (<!-- ... -->),
+// lines containing a pinard marker prefix, and lines that are entirely process
+// noise when considered in isolation (LGTM / CI / merge-when-green / thanks …).
+// Lines that merely mention a noise phrase alongside substantive content are kept.
+// Returns "" if no substantive content survives.
+func sanitizeReviewNote(body string) string {
+	lines := strings.Split(body, "\n")
+	var kept []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Drop pure HTML comment lines.
+		if strings.HasPrefix(trimmed, "<!--") && strings.HasSuffix(trimmed, "-->") {
+			continue
+		}
+		// Drop lines that are (or contain) pinard marker tokens.
+		if strings.Contains(trimmed, "<!-- pinard:") ||
+			strings.Contains(trimmed, conductorMarker) ||
+			strings.HasPrefix(trimmed, "pinard:") {
+			continue
+		}
+		// Drop lines that are entirely noise when considered in isolation.
+		if isNoiseLine(trimmed) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+// extractMemoryMarker returns the content after the @memory: prefix (trimmed),
+// or "" if the note does not carry the marker.
+func extractMemoryMarker(body string) string {
+	trimmed := strings.TrimSpace(body)
+	if strings.HasPrefix(strings.ToLower(trimmed), strings.ToLower(memoryMarkerPrefix)) {
+		return strings.TrimSpace(trimmed[len(memoryMarkerPrefix):])
+	}
+	return ""
+}
+
+// ExtractMemoryMarkers scans notes and returns any @memory: marker contents.
+// Exported so callers (publishMRMemoryEvent, aoc mr-memory) can fire lessons.
+func ExtractMemoryMarkers(notes []gitlab.Note) []string {
+	var out []string
+	for _, note := range notes {
+		if note.System {
+			continue
+		}
+		if content := extractMemoryMarker(strings.TrimSpace(note.Body)); content != "" {
+			out = append(out, content)
+		}
+	}
+	return out
+}
+
+// MRMemoryIssueContext holds the closing-issue context embedded in the memory event.
+type MRMemoryIssueContext struct {
+	IID         int    `json:"iid"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+// MRMemoryReviewNote holds a pre-filtered review note for Pass 2 extraction.
+type MRMemoryReviewNote struct {
+	Author string `json:"author"`
+	Body   string `json:"body"`
+}
+
+// mrMemoryGitLab is the subset of the GitLab client used by BuildMRMemoryPayload.
+type mrMemoryGitLab interface {
+	GetMRChanges(repo string, iid int) ([]string, error)
+	GetMRClosingIssues(repo string, iid int) ([]gitlab.Issue, error)
+	GetIssue(repo string, iid int) (*gitlab.Issue, error)
+	ListMRNotes(repo string, iid int) ([]gitlab.Note, error)
+}
+
+// ShouldPublishMRMemory returns true if the MR should produce a memory event.
 // Label fast-paths override all heuristics: memory:skip → false, memory:capture → true.
-func shouldPublishMRMemory(mr *gitlab.MergeRequest) bool {
+func ShouldPublishMRMemory(mr *gitlab.MergeRequest) bool {
 	for _, lbl := range mr.Labels {
 		if lbl == "memory:skip" {
 			return false
@@ -945,39 +1086,28 @@ func shouldPublishMRMemory(mr *gitlab.MergeRequest) bool {
 	return true
 }
 
-// publishMRMemoryEvent assembles and publishes a memory event for a merged MR.
-// Fail-open: any error is logged and the MR is skipped without affecting the watcher loop.
-func (w *MRWatcher) publishMRMemoryEvent(entry *state.WatchedMR, mr *gitlab.MergeRequest) {
-	if !shouldPublishMRMemory(mr) {
-		log.Printf("[mr-memory] Skipping MR !%d on %s (noise filter)", mr.IID, entry.Project)
-		return
-	}
-
-	// Fetch changed file paths (no diff hunks).
-	filesChanged, err := w.GitLab.GetMRChanges(entry.Repo, mr.IID)
+// BuildMRMemoryPayload assembles the memory event payload for a merged MR.
+// It fetches changed files, closing issues, and review notes via the GitLab API.
+// Fail-open: errors are logged and the corresponding field is left empty.
+// Also returns all raw notes so callers can scan for @memory: markers.
+func BuildMRMemoryPayload(gl mrMemoryGitLab, project, repo string, mr *gitlab.MergeRequest) (map[string]any, []gitlab.Note, error) {
+	filesChanged, err := gl.GetMRChanges(repo, mr.IID)
 	if err != nil {
-		log.Printf("[mr-memory] GetMRChanges failed for !%d on %s: %v", mr.IID, entry.Project, err)
+		log.Printf("[mr-memory] GetMRChanges failed for !%d on %s: %v", mr.IID, project, err)
 		filesChanged = []string{}
 	}
 
-	// Fetch closing issues via API; fall back to parsing Closes #N.
-	type issueContext struct {
-		IID         int    `json:"iid"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-	}
-	var closingIssues []issueContext
-	apiIssues, apiErr := w.GitLab.GetMRClosingIssues(entry.Repo, mr.IID)
+	var closingIssues []MRMemoryIssueContext
+	apiIssues, apiErr := gl.GetMRClosingIssues(repo, mr.IID)
 	if apiErr != nil {
-		log.Printf("[mr-memory] GetMRClosingIssues failed for !%d on %s: %v (parsing description instead)", mr.IID, entry.Project, apiErr)
-		// Fallback: parse Closes #N from description.
+		log.Printf("[mr-memory] GetMRClosingIssues failed for !%d on %s: %v (parsing description instead)", mr.IID, project, apiErr)
 		for _, iid := range gitlab.ParseClosesN(mr.Description) {
-			issue, ferr := w.GitLab.GetIssue(entry.Repo, iid)
+			issue, ferr := gl.GetIssue(repo, iid)
 			if ferr != nil {
 				log.Printf("[mr-memory] GetIssue #%d failed: %v", iid, ferr)
 				continue
 			}
-			closingIssues = append(closingIssues, issueContext{
+			closingIssues = append(closingIssues, MRMemoryIssueContext{
 				IID:         issue.IID,
 				Title:       issue.Title,
 				Description: issue.Description,
@@ -985,7 +1115,7 @@ func (w *MRWatcher) publishMRMemoryEvent(entry *state.WatchedMR, mr *gitlab.Merg
 		}
 	} else {
 		for _, iss := range apiIssues {
-			closingIssues = append(closingIssues, issueContext{
+			closingIssues = append(closingIssues, MRMemoryIssueContext{
 				IID:         iss.IID,
 				Title:       iss.Title,
 				Description: iss.Description,
@@ -993,12 +1123,38 @@ func (w *MRWatcher) publishMRMemoryEvent(entry *state.WatchedMR, mr *gitlab.Merg
 		}
 	}
 
+	// Fetch review notes for Pass 2 delta extraction (§9) and @memory: scan (§10).
+	var allNotes []gitlab.Note
+	var reviewNotes []MRMemoryReviewNote
+	notes, notesErr := gl.ListMRNotes(repo, mr.IID)
+	if notesErr != nil {
+		log.Printf("[mr-memory] ListMRNotes failed for !%d on %s: %v (review notes omitted)", mr.IID, project, notesErr)
+	} else {
+		allNotes = notes
+		for _, note := range notes {
+			if note.System {
+				continue
+			}
+			body := strings.TrimSpace(note.Body)
+			// Pre-filter for Pass 2: strip marker/noise lines; drop the note only if
+			// nothing substantive survives.
+			clean := sanitizeReviewNote(body)
+			if clean == "" {
+				continue
+			}
+			reviewNotes = append(reviewNotes, MRMemoryReviewNote{
+				Author: note.Author.Username,
+				Body:   clean,
+			})
+		}
+	}
+
 	payload := map[string]any{
 		"source":        "mr",
-		"project":       entry.Project,
-		"repo":          entry.Repo,
+		"project":       project,
+		"repo":          repo,
 		"iid":           mr.IID,
-		"scope":         entry.Project,
+		"scope":         project,
 		"title":         mr.Title,
 		"description":   mr.Description,
 		"issues":        closingIssues,
@@ -1006,14 +1162,92 @@ func (w *MRWatcher) publishMRMemoryEvent(entry *state.WatchedMR, mr *gitlab.Merg
 		"merged_at":     mr.MergedAt,
 		"author":        mr.Author.Username,
 		"url":           mr.WebURL,
+		"review_notes":  reviewNotes,
+	}
+	return payload, allNotes, nil
+}
+
+// PublishMRMemory publishes a pre-built MR memory payload to the pinard memory stream.
+func PublishMRMemory(nc *pnats.Client, vignoble string, payload map[string]any) error {
+	subject := pnats.MemorySubject(vignoble, "mr")
+	return nc.Publish(subject, payload)
+}
+
+// PublishMemoryLesson publishes a single @memory: lesson to the memory.rules pipeline.
+// Exported for use by both the live watcher and aoc mr-memory replay.
+func PublishMemoryLesson(nc *pnats.Client, vignoble, project, content string) error {
+	title := content
+	if idx := strings.Index(content, "\n"); idx > 0 {
+		title = strings.TrimSpace(content[:idx])
+	}
+	if len(title) > 120 {
+		title = title[:120]
+	}
+	payload := map[string]any{
+		"op":      "upsert",
+		"title":   title,
+		"content": content,
+		"type":    "rule",
+		"project": project,
+	}
+	subject := pnats.MemorySubject(vignoble, "rules")
+	return nc.Publish(subject, payload)
+}
+
+// publishMRMemoryEvent assembles and publishes a memory event for a merged MR.
+// Fail-open: any error is logged and the MR is skipped without affecting the watcher loop.
+func (w *MRWatcher) publishMRMemoryEvent(entry *state.WatchedMR, mr *gitlab.MergeRequest) {
+	if !ShouldPublishMRMemory(mr) {
+		log.Printf("[mr-memory] Skipping MR !%d on %s (noise filter)", mr.IID, entry.Project)
+		return
 	}
 
-	subject := pnats.MemorySubject(w.Vignoble.Name, "mr")
-	if err := w.NATS.Publish(subject, payload); err != nil {
+	payload, allNotes, err := BuildMRMemoryPayload(w.GitLab, entry.Project, entry.Repo, mr)
+	if err != nil {
+		log.Printf("[mr-memory] BuildMRMemoryPayload failed for MR !%d on %s: %v", mr.IID, entry.Project, err)
+		return
+	}
+
+	if err := PublishMRMemory(w.NATS, w.Vignoble.Name, payload); err != nil {
 		log.Printf("[mr-memory] Publish failed for MR !%d on %s: %v", mr.IID, entry.Project, err)
 		return
 	}
-	log.Printf("[mr-memory] Published memory event for MR !%d on %s (%d files, %d issues)", mr.IID, entry.Project, len(filesChanged), len(closingIssues))
+
+	var issueCount int
+	if issues, ok := payload["issues"].([]MRMemoryIssueContext); ok {
+		issueCount = len(issues)
+	}
+	var fileCount int
+	if files, ok := payload["files_changed"].([]string); ok {
+		fileCount = len(files)
+	}
+	var reviewNoteCount int
+	if rn, ok := payload["review_notes"].([]MRMemoryReviewNote); ok {
+		reviewNoteCount = len(rn)
+	}
+	log.Printf("[mr-memory] Published memory event for MR !%d on %s (%d files, %d issues, %d review notes)", mr.IID, entry.Project, fileCount, issueCount, reviewNoteCount)
+
+	// §10 @memory: markers — publish lessons from all notes.
+	for _, content := range ExtractMemoryMarkers(allNotes) {
+		w.publishMemoryLesson(entry.Project, content)
+	}
+}
+
+// publishMemoryLesson routes a @memory: note body to the memory.rules (lesson)
+// pipeline. Fail-open: any error is logged and does not affect the caller.
+func (w *MRWatcher) publishMemoryLesson(project, content string) {
+	if w.NATS == nil || w.Vignoble == nil {
+		return
+	}
+	if err := PublishMemoryLesson(w.NATS, w.Vignoble.Name, project, content); err != nil {
+		log.Printf("[mr-memory] @memory: lesson publish failed for %s: %v", project, err)
+		return
+	}
+	title := content
+	if idx := strings.Index(content, "\n"); idx > 0 {
+		title = strings.TrimSpace(content[:idx])
+	}
+	log.Printf("[mr-memory] @memory: lesson published for %s: %.80s", project, title)
 }
 
 func (w *MRWatcher) markIssueClosed(project string, issueIID int) {

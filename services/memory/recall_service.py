@@ -338,6 +338,11 @@ def _summarize(
                 if scope:
                     label += f" \u00b7 {scope}"
                 line = f"[{label}] {name}"
+            elif provenance == "mr-review":
+                label = f"{role}:mr-review"
+                if scope:
+                    label += f" \u00b7 {scope}"
+                line = f"[{label}] {name}"
             else:
                 line = f"[{role}] {name}"
             if desc:
@@ -544,7 +549,7 @@ def _build_sources(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if e.get("id"):
                 source["id"] = str(e["id"])
             # Expose MR-specific traceability fields for /recall fetch.
-            if e.get("provenance") == "mr":
+            if e.get("provenance") in ("mr", "mr-review"):
                 data = e.get("data") or {}
                 if data.get("url"):
                     source["url"] = data["url"]
