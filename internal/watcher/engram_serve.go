@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Genentech/pinard/internal/engram"
@@ -29,6 +30,10 @@ type EngramServer struct {
 	dataDir string
 	bin     string
 	proc    *os.Process
+	// adopted is true when proc was not spawned by this daemon (e.g. inherited
+	// from a previous daemon after an unclean death). proc.Wait() only works on
+	// direct children, so adopted serves must be monitored via kill(pid,0).
+	adopted bool
 }
 
 // init resolves the engram binary and port. Returns an error if engram is not found.
@@ -59,6 +64,7 @@ func (e *EngramServer) Start() error {
 			log.Printf("[engram-serve] port %d in use by pid %d (cannot read environ) — adopting", e.port, pid)
 			proc, _ := os.FindProcess(pid)
 			e.proc = proc
+			e.adopted = true
 			return nil
 		}
 		if filepath.Clean(dataDir) == filepath.Clean(e.dataDir) {
@@ -66,6 +72,7 @@ func (e *EngramServer) Start() error {
 			log.Printf("[engram-serve] adopting existing serve pid %d on port %d", pid, e.port)
 			proc, _ := os.FindProcess(pid)
 			e.proc = proc
+			e.adopted = true
 			return nil
 		}
 		// Foreign serve (different data dir) — kill and replace.
@@ -105,6 +112,7 @@ func (e *EngramServer) launch(healthURL string) error {
 		return fmt.Errorf("engram serve: start: %w", err)
 	}
 	e.proc = cmd.Process
+	e.adopted = false
 	log.Printf("[engram-serve] started pid %d on port %d (data dir: %s)", e.proc.Pid, e.port, e.dataDir)
 
 	// Wait for the serve to become healthy (up to 5s).
@@ -139,29 +147,64 @@ func (e *EngramServer) Supervise(ctx context.Context) {
 			}
 		}
 
-		// Wait for the process to exit.
-		done := make(chan error, 1)
 		proc := e.proc
-		go func() { _, err := proc.Wait(); done <- err }()
+		adopted := e.adopted
 
-		select {
-		case <-ctx.Done():
-			return
-		case err := <-done:
-			if ctx.Err() != nil {
+		if adopted {
+			// Adopted (non-child) process: proc.Wait() would return ECHILD
+			// immediately. Poll liveness with kill(pid, 0) instead.
+			exited := e.pollAdoptedLiveness(ctx, proc)
+			if !exited {
+				// ctx cancelled — shut down.
 				return
 			}
-			log.Printf("[engram-serve] serve exited (%v) — restarting", err)
-			e.proc = nil
-			// Brief pause before restart to avoid tight loops on repeated failures.
+		} else {
+			// Spawned child: use proc.Wait() as before.
+			done := make(chan error, 1)
+			go func() { _, err := proc.Wait(); done <- err }()
+
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(2 * time.Second):
+			case err := <-done:
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("[engram-serve] serve exited (%v) — restarting", err)
 			}
-			if err := e.Start(); err != nil {
-				log.Printf("[engram-serve] restart failed: %v", err)
+		}
+
+		e.proc = nil
+		// Brief pause before restart to avoid tight loops on repeated failures.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+		if err := e.Start(); err != nil {
+			log.Printf("[engram-serve] restart failed: %v", err)
+		}
+	}
+}
+
+// pollAdoptedLiveness polls an adopted (non-child) process with kill(pid,0)
+// until the process exits (ESRCH) or ctx is done. Returns true if the process
+// exited, false if ctx was cancelled.
+func (e *EngramServer) pollAdoptedLiveness(ctx context.Context, proc *os.Process) bool {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			err := syscall.Kill(proc.Pid, 0)
+			if err == syscall.ESRCH {
+				log.Printf("[engram-serve] adopted serve pid %d exited — restarting", proc.Pid)
+				return true
 			}
+			// EPERM means process exists but we can't signal it — still alive.
+			// Any other error: treat conservatively as alive.
 		}
 	}
 }
