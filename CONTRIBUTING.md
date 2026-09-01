@@ -87,7 +87,7 @@ certifying you have the right to submit the work under the MIT License.
 
 Pinard is developed on an internal source-of-truth and mirrored to
 `github.com/Genentech/pinard` as a **freshly-scrubbed snapshot** (we never push
-internal git history — it contains credentials and internal hostnames).
+internal git history — it contains internal hostnames and references).
 
 ### Workflow
 

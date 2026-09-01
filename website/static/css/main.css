@@ -120,7 +120,7 @@ img { display: block; max-width: 100%; }
   position: absolute;
   inset: 0;
   background-color: var(--charcoal);
-  background-image: url('/images/photos/hero-vineyard.jpg');
+  background-image: url('../images/photos/hero-vineyard.jpg');
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
@@ -590,7 +590,7 @@ img { display: block; max-width: 100%; }
 .section-craft-bg {
   position: absolute;
   inset: 0;
-  background-image: url('/images/photos/craft-manifesto-estate-v4.png');
+  background-image: url('../images/photos/craft-manifesto-estate-v4.png');
   background-size: 100% auto;
   background-position: center top;
   background-repeat: no-repeat;
@@ -784,7 +784,7 @@ img { display: block; max-width: 100%; }
   content: '';
   position: absolute;
   inset: 0;
-  background-image: url('/images/photos/chapter-vignoble.jpg');
+  background-image: url('../images/photos/chapter-vignoble.jpg');
   background-size: cover;
   background-position: center;
   opacity: 0.1;
@@ -903,7 +903,7 @@ img { display: block; max-width: 100%; }
 .domaines-banner-bg {
   position: absolute;
   inset: 0;
-  background-image: url('/images/photos/feature-domaines.jpg');
+  background-image: url('../images/photos/feature-domaines.jpg');
   background-size: cover;
   background-position: center 40%;
   transition: transform var(--transition);
