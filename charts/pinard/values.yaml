@@ -219,7 +219,7 @@ memory:
     repository: ""        # the pinard image (set in custom-<env>.yaml)
     tag: ""
     pullPolicy: IfNotPresent
-  command: ["python", "-m", "services.memory.ingester"]
+  command: ["/usr/local/bin/docker-entrypoint.sh", "python", "-m", "services.memory.ingester"]
   # ssh: bot SSH key for git access to wiki repos. Pulled from Vault via ExternalSecret.
   # sshKey: Vault property name for the private key (mounted at /secrets/ssh/<sshKey>).
   ssh:

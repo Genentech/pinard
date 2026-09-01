@@ -354,6 +354,7 @@ spec:
           {{- if and $c.vault.enabled $c.vault.caBundleVaultKey }}
           secret:
             secretName: {{ $vaultSecretName }}
+            optional: true
             items:
               - key: {{ $c.vault.caBundleProperty | default "ca-bundle.crt" }}
                 path: {{ $c.vault.caBundleProperty | default "ca-bundle.crt" }}

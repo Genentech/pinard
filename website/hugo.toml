@@ -1,5 +1,11 @@
 baseURL = "/"
 title = "Pinard"
+
+# Rewrite root-relative URLs (/images, /css, /docs, ...) against baseURL so the
+# site works when served from a project-pages subpath (e.g. /pinard/). Many
+# templates + content use hardcoded absolute paths; canonifyURLs prefixes them
+# with the deploy baseURL passed by the Pages workflow.
+canonifyURLs = true
 languageCode = "en-US"
 enableEmoji = true
 
