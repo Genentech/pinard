@@ -153,7 +153,7 @@ title: Pinard
     <div class="features-grid reveal">
       <h3 class="features-subhead">The Engine</h3>
       <a class="feature-card" href="/features/processes/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-processes.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-processes.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Semi-Deterministic Loops</div>
@@ -165,7 +165,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card" href="/features/agents/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-agents.jpg'); --photo-position: center top"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-agents.jpg'); --photo-position: center top"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Independent Agents</div>
@@ -177,7 +177,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card" href="/features/memory/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-memory.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-memory.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Persistent Memory</div>
@@ -189,7 +189,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card feature-card-wide" href="/features/domaines/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-domaines.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-domaines.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Distributed — Les Domaines</div>
@@ -202,7 +202,7 @@ title: Pinard
       </a>
       <h3 class="features-subhead">Orchestration &amp; Control</h3>
       <a class="feature-card" href="/features/parcelles/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-parcelles.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-parcelles.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Parcelles &amp; the Crew</div>
@@ -214,7 +214,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card" href="/features/web-terminal/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-web-terminal.jpg'); --photo-position: center 78%"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-web-terminal.jpg'); --photo-position: center 78%"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Live Terminals &amp; Control Room</div>
@@ -226,7 +226,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card" href="/features/scheduling/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-scheduling.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-scheduling.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Scheduled Harvests</div>
@@ -239,7 +239,7 @@ title: Pinard
       </a>
       <h3 class="features-subhead">The SWE Vintage <span class="features-subhead-note">— built-in loop for software development</span></h3>
       <a class="feature-card" href="/features/issue-workflow/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-issue-workflow.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-issue-workflow.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Issue-Driven Work</div>
@@ -251,7 +251,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card" href="/features/openspec-dispatch/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-openspec-dispatch.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-openspec-dispatch.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">OpenSpec Dispatch</div>
@@ -263,7 +263,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card" href="/features/cuvee/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-cuvee-branching.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-cuvee-branching.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Cuvée Branching</div>
@@ -275,7 +275,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card" href="/features/auto-merge/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-auto-merge.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-auto-merge.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Auto-Merge &amp; Watch</div>
@@ -287,7 +287,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card" href="/features/review-forwarding/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-review-forwarding.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-review-forwarding.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Review Forwarding</div>
@@ -299,7 +299,7 @@ title: Pinard
         </div>
       </a>
       <a class="feature-card" href="/features/pipeline-recovery/">
-        <div class="feature-card-bg" style="background-image: url('/images/photos/feature-pipeline-recovery.jpg'); --photo-position: center"></div>
+        <div class="feature-card-bg" style="background-image: url('images/photos/feature-pipeline-recovery.jpg'); --photo-position: center"></div>
         <div class="feature-card-overlay"></div>
         <div class="feature-card-body">
           <div class="feature-title">Pipeline Retry &amp; Recovery</div>
