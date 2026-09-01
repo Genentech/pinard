@@ -16,7 +16,7 @@
 
 <!-- FEATURE HERO -->
 <header class="feature-hero">
-  <div class="feature-hero-bg{{ if eq .Params.hero_fit "portrait" }} feature-hero-bg-portrait{{ end }}" style="background-image: url('{{ $photo }}'); --photo-position: {{ $photoPosition }}; --photo-position-mobile: {{ $photoPositionMobile }}"></div>
+  <div class="feature-hero-bg{{ if eq .Params.hero_fit "portrait" }} feature-hero-bg-portrait{{ end }}" style="background-image: url('{{ $photo | strings.TrimPrefix "/" | absURL }}'); --photo-position: {{ $photoPosition }}; --photo-position-mobile: {{ $photoPositionMobile }}"></div>
   <div class="feature-hero-overlay"></div>
   <div class="feature-hero-content">
     <a class="feature-back" href="/#features">← The Cellar</a>
