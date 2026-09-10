@@ -6,6 +6,8 @@ group: Introduction
 
 This guide takes you from nothing to a running vignoble with a conductor.
 
+> **Two deployment paths.** The enterprise path (shared NATS cluster, cloud services) is described in full below. For a **solo laptop install** with no shared infrastructure, jump to [Solo mode (laptop)](#solo-mode-laptop).
+
 <figure class="doc-figure doc-figure--wide">
   <div class="doc-figure-visual">
     <img src="/images/docs/getting-started-journey-v2.jpg" alt="A six-stop sketched journey from a Pinard installation crate through credentials, estate creation, repository registration, daemon startup, and an open conductor control room.">
@@ -159,9 +161,67 @@ Run `pinard` from anywhere (with no vignoble) to pick and attach to a running se
 `fzf`. The conductor is optional — the daemon does the mechanical work on its own — but it
 gives you the LLM-powered control room.
 
+## Solo mode (laptop)
+
+For a single-user laptop install with **no shared NATS cluster or cloud services**,
+use `aoc init --local`. It writes a `~/.config/pinard/credentials.yaml` pre-configured
+for localhost endpoints (NATS on `4222`, engram on `7437`, SurrealDB on `8000`,
+webterm on `8080`) and skips the `--gitlab-host` requirement.
+
+### 1. Start the local service stack
+
+Spin up the `pinard-services` Docker image, which bundles NATS, engram, SurrealDB,
+the memory services, and the webterm gateway under one supervisor:
+
+```bash
+docker run -d \
+  -v $(pwd)/pinard-data:/data \
+  -e SURREAL_PASS=changeme \
+  -e NATS_VIGNOBLE=myproject \
+  -p 4222:4222 -p 7437:7437 -p 8000:8000 -p 8080:8080 \
+  pinard-services:latest
+```
+
+All persistent state (NATS JetStream store, engram database, SurrealDB) lives under
+the mounted `/data` volume so restarts resume from the same state.
+
+### 2. Scaffold the vignoble
+
+```bash
+aoc init myproject --local                          # no --gitlab-host required
+# Optional: add GitLab details if you want issue/MR tracking
+aoc init myproject --local --gitlab-host gitlab.com --gitlab-group mygroup
+cd ~/vignoble-myproject
+```
+
+`--local` writes `~/.config/pinard/credentials.yaml` with localhost endpoints. It does
+**not** start the daemon — the daemon is started separately after services are up.
+
+### 3. Set your LLM key and start the daemon
+
+```bash
+echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.config/pinard/env
+aoc daemon start
+```
+
+BYO LLM keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) in `~/.config/pinard/env` are
+passed through to agents automatically — no proxy configuration needed.
+
+### 4. Launch the conductor
+
+```bash
+cd ~/vignoble-myproject
+pinard
+```
+
+> **macOS port overrides.** If a native macOS Pinard services app is present, it writes
+> `~/Library/Application Support/Pinard/config.json` with the ports it chose. `aoc init
+> --local` reads this file automatically so the generated `credentials.yaml` uses the
+> same ports. You rarely need to set these manually.
+
 ## Next steps
 
 - [Orchestration & Parcelles](/docs/orchestration/) — how the régisseur, maîtres, and
   vendangeurs divide work.
-- [Issue Workflow](/docs/issue-workflow/) — drive work from GitLab issues.
+- [The SWE Process](/docs/swe-process/) — drive work from GitLab issues.
 - [CLI Reference](/docs/cli-reference/) — the full `aoc` and `pinard` surface.

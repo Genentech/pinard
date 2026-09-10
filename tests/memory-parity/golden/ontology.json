@@ -1,0 +1,342 @@
+{
+  "entity_roles": {
+    "task": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "effect_id",
+      "process",
+      "status"
+    ],
+    "step": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "task_name",
+      "tool",
+      "outcome"
+    ],
+    "verdict": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "passed",
+      "rationale",
+      "confidence"
+    ],
+    "decision": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "options_considered",
+      "chosen",
+      "rationale"
+    ],
+    "gate": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "condition",
+      "passed"
+    ],
+    "action": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "tool",
+      "parameters",
+      "result_summary",
+      "success"
+    ],
+    "diagnosis": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "symptom",
+      "root_cause",
+      "confidence"
+    ],
+    "log_pattern": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "pattern",
+      "signals",
+      "example"
+    ],
+    "environment_condition": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "metric",
+      "value",
+      "threshold",
+      "breached"
+    ],
+    "artifact": [
+      "name",
+      "description",
+      "version",
+      "role",
+      "path",
+      "artifact_type",
+      "size_bytes"
+    ]
+  },
+  "edges": {
+    "DependsOn": {
+      "table_name": "depends_on",
+      "valid_pairs": [
+        [
+          "task",
+          "task"
+        ],
+        [
+          "task",
+          "gate"
+        ],
+        [
+          "step",
+          "step"
+        ],
+        [
+          "step",
+          "artifact"
+        ],
+        [
+          "action",
+          "artifact"
+        ],
+        [
+          "action",
+          "environment_condition"
+        ]
+      ]
+    },
+    "Produces": {
+      "table_name": "produces",
+      "valid_pairs": [
+        [
+          "task",
+          "artifact"
+        ],
+        [
+          "step",
+          "artifact"
+        ],
+        [
+          "action",
+          "artifact"
+        ],
+        [
+          "action",
+          "verdict"
+        ],
+        [
+          "step",
+          "verdict"
+        ]
+      ]
+    },
+    "Consumes": {
+      "table_name": "consumes",
+      "valid_pairs": [
+        [
+          "task",
+          "artifact"
+        ],
+        [
+          "step",
+          "artifact"
+        ],
+        [
+          "action",
+          "artifact"
+        ],
+        [
+          "action",
+          "environment_condition"
+        ]
+      ]
+    },
+    "IndicatesProblem": {
+      "table_name": "indicates_problem",
+      "valid_pairs": [
+        [
+          "log_pattern",
+          "diagnosis"
+        ],
+        [
+          "environment_condition",
+          "diagnosis"
+        ],
+        [
+          "verdict",
+          "diagnosis"
+        ]
+      ]
+    },
+    "ResolvedBy": {
+      "table_name": "resolved_by",
+      "valid_pairs": [
+        [
+          "diagnosis",
+          "action"
+        ],
+        [
+          "diagnosis",
+          "step"
+        ],
+        [
+          "diagnosis",
+          "task"
+        ]
+      ]
+    },
+    "RequiresCondition": {
+      "table_name": "requires_condition",
+      "valid_pairs": [
+        [
+          "task",
+          "environment_condition"
+        ],
+        [
+          "step",
+          "environment_condition"
+        ],
+        [
+          "gate",
+          "environment_condition"
+        ],
+        [
+          "action",
+          "environment_condition"
+        ]
+      ]
+    },
+    "TriggersDecision": {
+      "table_name": "triggers_decision",
+      "valid_pairs": [
+        [
+          "gate",
+          "decision"
+        ],
+        [
+          "environment_condition",
+          "decision"
+        ],
+        [
+          "verdict",
+          "decision"
+        ],
+        [
+          "diagnosis",
+          "decision"
+        ]
+      ]
+    }
+  },
+  "obs_type_to_role": {
+    "rule": "decision",
+    "fact": "artifact",
+    "teaching-episode": "task",
+    "summary": "task",
+    "diagnosis": "diagnosis",
+    "action": "action",
+    "log_pattern": "log_pattern",
+    "environment_condition": "environment_condition",
+    "gate": "gate",
+    "step": "step",
+    "verdict": "verdict",
+    "bugfix": "diagnosis",
+    "decision": "decision",
+    "architecture": "artifact",
+    "discovery": "artifact",
+    "pattern": "decision",
+    "config": "artifact",
+    "preference": "artifact",
+    "session_summary": "task",
+    "plan": "task",
+    "manual": "decision"
+  },
+  "entity_role_names": [
+    "action",
+    "artifact",
+    "decision",
+    "diagnosis",
+    "environment_condition",
+    "gate",
+    "log_pattern",
+    "step",
+    "task",
+    "verdict"
+  ],
+  "edge_table_names": [
+    "consumes",
+    "depends_on",
+    "indicates_problem",
+    "produces",
+    "requires_condition",
+    "resolved_by",
+    "triggers_decision"
+  ],
+  "corpus_ingest": [
+    {
+      "obs_id": "fixture-obs-001",
+      "obs_type": "rule",
+      "expected_role": "decision",
+      "expected_name": "Use JetStream for all durable event publishing \u2014 never core NATS for stream-captured subjects"
+    },
+    {
+      "obs_id": "fixture-obs-002",
+      "obs_type": "fact",
+      "expected_role": "artifact",
+      "expected_name": "SurrealDB uses HNSW for vector search with cosine distance \u2014 index name is entity_embedding_hnsw"
+    },
+    {
+      "obs_id": "fixture-obs-003",
+      "obs_type": "diagnosis",
+      "expected_role": "diagnosis",
+      "expected_name": "Memory ingester stalls when ROSETTA_URL is unreachable \u2014 falls back to no-embedding upsert after 30s timeout"
+    },
+    {
+      "obs_id": "fixture-obs-004",
+      "obs_type": "teaching-episode",
+      "expected_role": "task",
+      "expected_name": "To reset the ingest cursor and force full re-ingestion, run: memory-ingester --reingest"
+    },
+    {
+      "obs_id": "fixture-obs-005",
+      "obs_type": "decision",
+      "expected_role": "decision",
+      "expected_name": "Go memory backend is the canonical implementation \u2014 Python services deleted in commit 94efa9d"
+    },
+    {
+      "obs_id": "fixture-obs-006",
+      "obs_type": "action",
+      "expected_role": "action",
+      "expected_name": "Apply SurrealDB schema DDL before ingesting any observations \u2014 EnsureSchema is idempotent"
+    },
+    {
+      "obs_id": "fixture-obs-007",
+      "obs_type": "environment_condition",
+      "expected_role": "environment_condition",
+      "expected_name": "SurrealDB must be version 2.x or later \u2014 HNSW and FULLTEXT ANALYZER are required features"
+    },
+    {
+      "obs_id": "fixture-obs-008",
+      "obs_type": "log_pattern",
+      "expected_role": "log_pattern",
+      "expected_name": "ERROR: Engram HTTP fetch \u2014 connection refused \u2014 indicates ENGRAM_URL points to a stopped service"
+    }
+  ]
+}

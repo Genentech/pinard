@@ -52,7 +52,9 @@ spec:
         - name: graphiti
           image: "{{ $c.graphiti.image.repository }}:{{ $c.graphiti.image.tag }}"
           imagePullPolicy: {{ $c.graphiti.image.pullPolicy }}
-          command: ["python", "-m", "services.memory.graphiti_eval.verify"]
+          {{- if $c.graphiti.command }}
+          command: {{ toYaml $c.graphiti.command | nindent 10 }}
+          {{- end }}
           env:
             - name: FALKORDB_URL
               value: "bolt://localhost:{{ $c.falkordb.port }}"

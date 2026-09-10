@@ -51,6 +51,22 @@ Pinard's memory is **local-first, curated, and portable**:
 
 ## What runs today
 
+### Memory services (Go native binaries)
+
+The memory layer is implemented as three Go binaries, deployed together inside the
+`pinard-services` image (or as standalone processes on any host):
+
+| Binary | Role |
+|--------|------|
+| `memory-ingester` | Polls engram for curated observations, maps them to the pinard ontology, and upserts records into SurrealDB. Also subscribes to NATS for MR-sync and rule/episode events. |
+| `memory-recall` | Answers `pinard.<vignoble>.recall` NATS requests with knowledge from SurrealDB — semantic vector search (via Rosetta), lexical lookup, and graph traversal. Fail-open with a ~3 s timeout. |
+| `memory-rollup` | Compacts and summarizes accumulated episodic records to keep the store manageable. |
+
+All three are Go binaries with no Python runtime dependency. They ship natively for
+Linux (inside `pinard-services`) and build for any platform where Go is available.
+See [The Layered Memory Architecture](/docs/memory-architecture/) for the full
+SurrealDB schema and layer semantics.
+
 ### The wiki bundle
 
 From Pinard v0.18 onward, the daemon seeds a `wiki/` directory inside the vignoble
@@ -187,7 +203,8 @@ Every hit returned by `recall` (and by `/recall`) carries a consistent label:
 | `[lesson · <scope>]` | Pinned lesson entity |
 | `[teaching · <scope>]` | Entity extracted from a teaching episode |
 | `[entity:<role> · <scope>]` | Typed entity (role = `artifact`, `gotcha`, etc.) from SurrealDB scope `<scope>` |
-| `[decision:mr · <scope>]` | Decision/artifact/diagnosis entity extracted from a merged MR (see [MR knowledge ingestion](/docs/memory-curation/#mr-knowledge-ingestion)) |
+| `[decision:mr · <scope>]` | Decision/artifact/diagnosis entity extracted from an MR description + closing issues (Pass 1). See [MR knowledge ingestion](/docs/memory-curation/#mr-knowledge-ingestion). |
+| `[decision:mr-review · <scope>]` | Net-new entity extracted from the MR's review notes (Pass 2); `artifact:mr-review` and `diagnosis:mr-review` also exist. |
 | `[engram:<type> · <engram-scope>]` | Engram observation of type `<type>`; `<engram-scope>` is Engram's own `project` or `personal` |
 
 Curated hits also show a ref inline — e.g. `(ref: wiki:ops/singularity)` or
@@ -272,7 +289,9 @@ Boot injection is **fail-open** — if the memory service is unavailable or time
   detached and left running across daemon restarts, so `mem_*` has no gap. An
   explicit `aoc daemon stop` tears it down; a `restart` or crash leaves it up.
 - Check health with the **🧠 status-line indicator**, the engram section of
-  `aoc status`, and **`mem_doctor`**.
+  `aoc status`, **`mem_doctor`**, and **`aoc memory-status`** — the latter gives a
+  unified three-section view of Engram replication, SurrealDB ingestion, and wiki
+  curation health (see [CLI Reference](/docs/cli-reference/#aoc-memory-status)).
 - Cloud sync is **best-effort** — if replication is down, the local store is still
   the source of truth and agents keep working.
 

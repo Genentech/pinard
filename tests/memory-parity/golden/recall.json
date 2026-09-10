@@ -1,0 +1,112 @@
+{
+  "queries": [
+    {
+      "query": "JetStream durable events",
+      "expected_obs_ids": [
+        "fixture-obs-001"
+      ]
+    },
+    {
+      "query": "SurrealDB vector search HNSW",
+      "expected_obs_ids": [
+        "fixture-obs-002"
+      ]
+    },
+    {
+      "query": "ingester timeout stalls",
+      "expected_obs_ids": [
+        "fixture-obs-003"
+      ]
+    },
+    {
+      "query": "reset ingest cursor reingest",
+      "expected_obs_ids": [
+        "fixture-obs-004"
+      ]
+    },
+    {
+      "query": "Go memory backend canonical",
+      "expected_obs_ids": [
+        "fixture-obs-005"
+      ]
+    },
+    {
+      "query": "apply schema before ingesting",
+      "expected_obs_ids": [
+        "fixture-obs-006"
+      ]
+    },
+    {
+      "query": "SurrealDB version requirement",
+      "expected_obs_ids": [
+        "fixture-obs-007"
+      ]
+    },
+    {
+      "query": "ENGRAM_URL connection refused error",
+      "expected_obs_ids": [
+        "fixture-obs-008"
+      ]
+    }
+  ],
+  "entities": [
+    {
+      "obs_id": "fixture-obs-001",
+      "obs_type": "rule",
+      "role": "decision",
+      "name": "Use JetStream for all durable event publishing \u2014 never core NATS for stream-captured subjects",
+      "content": "Use JetStream for all durable event publishing \u2014 never core NATS for stream-captured subjects"
+    },
+    {
+      "obs_id": "fixture-obs-002",
+      "obs_type": "fact",
+      "role": "artifact",
+      "name": "SurrealDB uses HNSW for vector search with cosine distance \u2014 index name is entity_embedding_hnsw",
+      "content": "SurrealDB uses HNSW for vector search with cosine distance \u2014 index name is entity_embedding_hnsw"
+    },
+    {
+      "obs_id": "fixture-obs-003",
+      "obs_type": "diagnosis",
+      "role": "diagnosis",
+      "name": "Memory ingester stalls when ROSETTA_URL is unreachable \u2014 falls back to no-embedding upsert after 30s timeout",
+      "content": "Memory ingester stalls when ROSETTA_URL is unreachable \u2014 falls back to no-embedding upsert after 30s timeout"
+    },
+    {
+      "obs_id": "fixture-obs-004",
+      "obs_type": "teaching-episode",
+      "role": "task",
+      "name": "To reset the ingest cursor and force full re-ingestion, run: memory-ingester --reingest",
+      "content": "To reset the ingest cursor and force full re-ingestion, run: memory-ingester --reingest"
+    },
+    {
+      "obs_id": "fixture-obs-005",
+      "obs_type": "decision",
+      "role": "decision",
+      "name": "Go memory backend is the canonical implementation \u2014 Python services deleted in commit 94efa9d",
+      "content": "Go memory backend is the canonical implementation \u2014 Python services deleted in commit 94efa9d"
+    },
+    {
+      "obs_id": "fixture-obs-006",
+      "obs_type": "action",
+      "role": "action",
+      "name": "Apply SurrealDB schema DDL before ingesting any observations \u2014 EnsureSchema is idempotent",
+      "content": "Apply SurrealDB schema DDL before ingesting any observations \u2014 EnsureSchema is idempotent"
+    },
+    {
+      "obs_id": "fixture-obs-007",
+      "obs_type": "environment_condition",
+      "role": "environment_condition",
+      "name": "SurrealDB must be version 2.x or later \u2014 HNSW and FULLTEXT ANALYZER are required features",
+      "content": "SurrealDB must be version 2.x or later \u2014 HNSW and FULLTEXT ANALYZER are required features"
+    },
+    {
+      "obs_id": "fixture-obs-008",
+      "obs_type": "log_pattern",
+      "role": "log_pattern",
+      "name": "ERROR: Engram HTTP fetch \u2014 connection refused \u2014 indicates ENGRAM_URL points to a stopped service",
+      "content": "ERROR: Engram HTTP fetch \u2014 connection refused \u2014 indicates ENGRAM_URL points to a stopped service"
+    }
+  ],
+  "recall_threshold": 0.9,
+  "min_overlap_count": 7
+}

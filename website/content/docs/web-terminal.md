@@ -181,7 +181,9 @@ Opening the gateway with **no `target`** (`/sessions`) serves an authenticated,
 
 Vendangeur rows are enriched with their parcelle and current state. **Remote agents**
 (standalone/HPC workers not on the local tmux host) appear in the index as long as their
-`lastSeen` timestamp is fresh (within 5 minutes). A vignoble with no live local responder
+`lastSeen` timestamp is fresh (within 5 minutes) — and they are **clickable links** pointing
+to a live terminal view served by the remote host's responder (the 🌐 badge indicates a
+self-served responder rather than the local daemon). A vignoble with no live local responder
 still shows any recently-active remote workers from the KV; it degrades gracefully rather
 than erroring. Scoped (signed-link) viewers never see the index — it's operators only.
 
@@ -205,20 +207,23 @@ attach directly.
 ## `aoc attach` — local terminal streaming
 
 For operators on the Pinard host (or any machine with NATS access), `aoc attach`
-provides a **direct local terminal view** without opening a browser:
+provides a **direct local terminal view** without opening a browser. It uses the
+same grant-gated responder protocol as the web gateway — `webterm.grant_secret` must
+be set in `credentials.yaml`.
 
 ```bash
 aoc attach <session>               # stream by session name, agentId, or runId
 aoc attach <session> --timeout 5m  # detach after 5 min idle
+aoc attach <session> --steer       # writable steer mode (operator only)
 ```
 
-On **local sessions**, `aoc attach` starts an in-process PTY pump automatically,
-so no separate `aoc webterm-responder` process is needed. For remote sessions, the
-output is received over NATS (the remote host must be running a responder). Press
-`Ctrl+C` to detach.
+The remote host must be running a responder (`aoc webterm-responder` or the in-process
+daemon responder). Press `Ctrl+C` to detach — this sends a close signal so the
+responder tears down the PTY immediately.
 
-This is the CLI equivalent of the browser view — read-only, authenticated with
-operator NATS credentials only (no SSO grant required).
+`--steer` opens the session in read-write mode, forwarding your local keystrokes to
+the agent's PTY. Like the browser steer mode, it is operator-only — the grant is
+minted with `ModeRW` and the responder enforces it at both ends.
 
 ## Known limitations
 

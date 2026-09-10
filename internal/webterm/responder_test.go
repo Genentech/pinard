@@ -1,6 +1,7 @@
 package webterm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -103,17 +104,13 @@ func TestResponderValidGrantButNoSession(t *testing.T) {
 	nc, _ := nats.Connect(url)
 	defer nc.Close()
 
-	// Socket with no sessions → has-session fails → "session not found".
+	// Socket with no sessions → has-session fails → responder stays SILENT.
+	// A local responder that lacks the target must not reply so it cannot win
+	// the request-reply race against a remote responder that does own the session.
 	runResponder(t, nc, "test", "pinard-nonexistent-socket")
 
 	valid, _ := SignGrant(Grant{Target: "ghost", Mode: ModeRO, Exp: time.Now().Add(time.Minute).Unix()}, grantSecret)
-	reply := requestViewer(t, nc, "test", valid, "v1")
-	if reply.OK {
-		t.Fatal("expected rejection for missing session")
-	}
-	if reply.Reason != "session not found" {
-		t.Fatalf("expected session not found, got %q", reply.Reason)
-	}
+	requestViewerExpectSilence(t, nc, "test", valid, "v1")
 }
 
 // fakeKV is a minimal pnats.KVReader backed by a map, for testing.
@@ -212,6 +209,42 @@ func TestGatewayForwardsCtlInterruptForROGrant(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for CtlInterrupt on ctl subject")
+	}
+}
+
+// TestProcessBackendDoesNotAnswerListSubject verifies that a Responder with a
+// ProcessBackend does not subscribe to ListSubject and therefore stays silent
+// when the control-room sends a list request — preventing an empty-list reply
+// from racing the daemon's full TmuxBackend reply (#270).
+func TestProcessBackendDoesNotAnswerListSubject(t *testing.T) {
+	ns, url := startEmbeddedNATS(t)
+	defer ns.Shutdown()
+	nc, _ := nats.Connect(url)
+	defer nc.Close()
+
+	vigorble := "test"
+	sessionName := "myparc--worker-abc"
+
+	// Start a Responder with ProcessBackend (no tmux, EnumeratesSessions=false).
+	backend := &ProcessBackend{Target: sessionName, PTY: &readOnlyWrapper{Reader: bytes.NewReader(nil)}}
+	resp := &Responder{
+		NC:          nc,
+		Vignoble:    vigorble,
+		GrantSecret: grantSecret,
+		MaxViewers:  4,
+		Backend:     backend,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = resp.Run(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+
+	// Mint a valid grant and send a ListSubject request.
+	grant, _ := SignGrant(Grant{Vignoble: vigorble, Target: sessionName, Mode: ModeRO, Exp: time.Now().Add(time.Minute).Unix()}, grantSecret)
+	req, _ := json.Marshal(ListReq{Grant: grant})
+	_, err := nc.Request(ListSubject(vigorble), req, 500*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected silence from ProcessBackend on ListSubject, got a reply")
 	}
 }
 

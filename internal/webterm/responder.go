@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os/exec"
 	"strconv"
@@ -12,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/creack/pty"
-	"github.com/nats-io/nats.go"
 	"github.com/Genentech/pinard/internal/pnats"
 	"github.com/Genentech/pinard/internal/session"
+	"github.com/creack/pty"
+	"github.com/nats-io/nats.go"
 )
 
 // Flow-control tuning. Terminal output is coalesced over short windows and
@@ -29,16 +30,173 @@ const (
 	throttleMark  = "\r\n\x1b[33m…output throttled…\x1b[0m\r\n"
 )
 
-// Responder attaches to local tmux targets on request and streams the PTY over
-// NATS. It runs on the pinard host (daemon-managed) and on standalone/HPC worker
-// hosts (`aoc webterm-responder`).
+// PTYBackend abstracts how the Responder acquires a PTY for a viewer. Two
+// implementations exist: TmuxBackend (attaches a local tmux session — the host
+// daemon / standalone webterm-responder path) and ProcessBackend (wraps an
+// already-open PTY file descriptor — the daemon-less worker self-serve path).
+type PTYBackend interface {
+	// HasSession returns true when the named target is available to attach.
+	HasSession(target string) bool
+	// Attach opens a PTY for the given target and size. writable controls whether
+	// the PTY is opened read-write (steer) or read-only. Returns the PTY file (for
+	// read/write/resize), a cleanup func that must be called when done, and a
+	// resize func that adjusts the backing session's window dimensions. Any of these
+	// may be no-ops depending on the backend.
+	Attach(target string, cols, rows int, writable bool) (ptmx io.ReadWriter, cleanup func(), resize func(cols, rows int), err error)
+	// EnumeratesSessions returns true when the backend can enumerate local tmux
+	// sessions for control-room listing. Only TmuxBackend returns true;
+	// ProcessBackend returns false — it must not answer ListSubject.
+	EnumeratesSessions() bool
+}
+
+// TmuxBackend is the standard backend: attaches a local tmux session.
+type TmuxBackend struct {
+	// Socket is the tmux socket name; defaults to "pinard-<Vignoble>".
+	Socket   string
+	Vignoble string
+}
+
+func (b *TmuxBackend) socket() string {
+	if b.Socket != "" {
+		return b.Socket
+	}
+	return "pinard-" + b.Vignoble
+}
+
+func (b *TmuxBackend) EnumeratesSessions() bool { return true }
+
+func (b *TmuxBackend) HasSession(target string) bool {
+	base, _ := parseTarget(target)
+	return exec.Command("tmux", "-L", b.socket(), "has-session", "-t", base).Run() == nil
+}
+
+func (b *TmuxBackend) Attach(target string, cols, rows int, writable bool) (io.ReadWriter, func(), func(int, int), error) {
+	base, window := parseTarget(target)
+	plainSession := window == ""
+
+	attachTarget := base
+	groupName := ""
+	if window != "" {
+		groupName = session.SanitizeName("wt-" + target)
+		if err := exec.Command("tmux", "-L", b.socket(), "new-session", "-d", "-s", groupName, "-t", base).Run(); err == nil {
+			_ = exec.Command("tmux", "-L", b.socket(), "set-option", "-t", groupName, "window-size", "manual").Run()
+			_ = exec.Command("tmux", "-L", b.socket(), "select-window", "-t", groupName+":"+window).Run()
+			attachTarget = groupName
+		} else {
+			groupName = ""
+		}
+	}
+
+	args := []string{"-L", b.socket(), "attach"}
+	if !writable {
+		args = append(args, "-r")
+	}
+	args = append(args, "-t", attachTarget)
+	cmd := exec.Command("tmux", args...)
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	if err != nil {
+		if groupName != "" {
+			_ = exec.Command("tmux", "-L", b.socket(), "kill-session", "-t", groupName).Run()
+		}
+		return nil, nil, nil, err
+	}
+
+	cleanup := func() {
+		_ = ptmx.Close()
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		if groupName != "" {
+			_ = exec.Command("tmux", "-L", b.socket(), "kill-session", "-t", groupName).Run()
+		}
+	}
+
+	// For plain sessions, drive the tmux window size directly (attach -r sets
+	// ignore-size on the client, so we must push the size ourselves).
+	resizeFn := func(c, r int) {
+		if !plainSession || c <= 0 || r <= 0 {
+			_ = pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(c), Rows: uint16(r)})
+			return
+		}
+		_ = pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(c), Rows: uint16(r)})
+		_ = exec.Command("tmux", "-L", b.socket(), "resize-window", "-t", attachTarget,
+			"-x", strconv.Itoa(c), "-y", strconv.Itoa(r)).Run()
+	}
+
+	if plainSession {
+		_ = exec.Command("tmux", "-L", b.socket(), "set-option", "-t", attachTarget, "window-size", "manual").Run()
+		_ = exec.Command("tmux", "-L", b.socket(), "resize-window", "-t", attachTarget,
+			"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows)).Run()
+	}
+
+	return ptmx, cleanup, resizeFn, nil
+}
+
+// ProcessBackend serves an already-open PTY (the worker's own pi process PTY).
+// HasSession always returns true for the configured target; Attach returns the
+// pre-opened PTY fd directly. Resize adjusts the PTY size but there is no tmux
+// window to resize. The PTY is NOT closed on cleanup — the caller owns its
+// lifetime.
+type ProcessBackend struct {
+	// Target is the session identifier this backend answers for.
+	Target string
+	// PTY is the already-open PTY file (read+write).
+	PTY io.ReadWriter
+	// Setsize resizes the underlying PTY (optional; may be nil).
+	Setsize func(cols, rows int)
+}
+
+func (b *ProcessBackend) EnumeratesSessions() bool { return false }
+
+func (b *ProcessBackend) HasSession(target string) bool {
+	base, _ := parseTarget(target)
+	return session.SanitizeName(base) == session.SanitizeName(b.Target)
+}
+
+func (b *ProcessBackend) Attach(_ string, cols, rows int, writable bool) (io.ReadWriter, func(), func(int, int), error) {
+	if b.Setsize != nil {
+		b.Setsize(cols, rows)
+	}
+	resizeFn := func(c, r int) {
+		if b.Setsize != nil {
+			b.Setsize(c, r)
+		}
+	}
+	// Belt-and-suspenders: for read-only grants, wrap the PTY in a write-blocking
+	// reader so that even if serveViewer's writable-gate regressed, no keystroke
+	// can reach the live pi process PTY. TmuxBackend achieves the same effect via
+	// tmux attach -r; ProcessBackend has no equivalent OS-level flag, so we
+	// enforce it here. Reads (output to viewer) are unaffected.
+	var rw io.ReadWriter = b.PTY
+	if !writable {
+		rw = &readOnlyWrapper{Reader: b.PTY}
+	}
+	// cleanup is a no-op: the caller owns the PTY fd lifetime.
+	return rw, func() {}, resizeFn, nil
+}
+
+// readOnlyWrapper wraps an io.Reader and makes Write a no-op error, providing
+// a backend-level read-only lock for ProcessBackend RO grants.
+type readOnlyWrapper struct{ io.Reader }
+
+func (r *readOnlyWrapper) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("write to read-only PTY disallowed")
+}
+
+// Responder attaches to targets on request and streams the PTY over NATS. It
+// runs on the pinard host (daemon-managed, TmuxBackend) and on standalone/HPC
+// worker hosts — both as `aoc webterm-responder` (TmuxBackend) and as a
+// worker-self-served responder bridging the pi PTY directly (ProcessBackend).
 type Responder struct {
 	NC          *nats.Conn
 	Vignoble    string
 	GrantSecret []byte
 	MaxViewers  int
 	IdleTimeout time.Duration
-	Socket      string // tmux socket; defaults to "pinard-<vignoble>"
+
+	// Backend determines how PTYs are acquired. Defaults to a TmuxBackend
+	// using Socket (or "pinard-<Vignoble>") when nil.
+	Backend PTYBackend
+	Socket  string // tmux socket name; only used by the default TmuxBackend
 
 	// KV is used to resolve a session's parcelle for interrupt routing.
 	// Optional: if nil (or if the session is not found), interrupt is a no-op
@@ -49,11 +207,15 @@ type Responder struct {
 	active int32 // atomic count of live viewers
 }
 
-func (r *Responder) socket() string {
-	if r.Socket != "" {
-		return r.Socket
+func (r *Responder) backend() PTYBackend {
+	if r.Backend != nil {
+		return r.Backend
 	}
-	return "pinard-" + r.Vignoble
+	socket := r.Socket
+	if socket == "" {
+		socket = "pinard-" + r.Vignoble
+	}
+	return &TmuxBackend{Socket: socket, Vignoble: r.Vignoble}
 }
 
 func (r *Responder) agentsBucket() string {
@@ -120,17 +282,26 @@ func (r *Responder) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("webterm responder subscribe: %w", err)
 	}
-	listSub, err := r.NC.Subscribe(ListSubject(r.Vignoble), func(m *nats.Msg) {
-		r.handleList(m)
-	})
-	if err != nil {
-		_ = sub.Unsubscribe()
-		return fmt.Errorf("webterm responder list subscribe: %w", err)
+
+	// ListSubject is only meaningful for TmuxBackend (control-room enumeration).
+	// ProcessBackend must not subscribe: it would reply with an empty list and race
+	// the daemon's full reply, causing the control-room to flicker (#270).
+	var listSub *nats.Subscription
+	if r.backend().EnumeratesSessions() {
+		listSub, err = r.NC.Subscribe(ListSubject(r.Vignoble), func(m *nats.Msg) {
+			r.handleList(m)
+		})
+		if err != nil {
+			_ = sub.Unsubscribe()
+			return fmt.Errorf("webterm responder list subscribe: %w", err)
+		}
 	}
-	log.Printf("[webterm] responder listening on %s (socket %s)", ReqSubject(r.Vignoble), r.socket())
+	log.Printf("[webterm] responder listening on %s", ReqSubject(r.Vignoble))
 	<-ctx.Done()
 	_ = sub.Unsubscribe()
-	_ = listSub.Unsubscribe()
+	if listSub != nil {
+		_ = listSub.Unsubscribe()
+	}
 	return ctx.Err()
 }
 
@@ -172,9 +343,16 @@ func (r *Responder) handleRequest(ctx context.Context, m *nats.Msg) {
 		return
 	}
 
-	base, _ := parseTarget(grant.Target)
-	if !r.hasSession(base) {
-		r.reply(m, false, "session not found")
+	// When this responder does not own the target, stay SILENT — do not reply.
+	// The request is broadcast to every responder on this subject; a fast local
+	// responder (e.g. the daemon TmuxBackend) that lacks the target must not send
+	// a rejection, because its reply would win the race against the legitimate
+	// remote/HPC responder (ProcessBackend) that does own the session.
+	// Silent-on-missing is the same pattern used above for unverifiable grants and
+	// foreign-vignoble requests. The gateway times out to "session not found" only
+	// if no responder claims the target.
+	if !r.backend().HasSession(grant.Target) {
+		log.Printf("[webterm] no local session %q — staying silent (another responder may own it)", grant.Target)
 		return
 	}
 	if int(atomic.LoadInt32(&r.active)) >= r.maxViewers() {
@@ -230,6 +408,13 @@ func (r *Responder) handleList(m *nats.Msg) {
 	_ = m.Respond(data)
 }
 
+func (r *Responder) socket() string {
+	if r.Socket != "" {
+		return r.Socket
+	}
+	return "pinard-" + r.Vignoble
+}
+
 func (r *Responder) tmuxSessions() []string {
 	out, err := exec.Command("tmux", "-L", r.socket(), "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
@@ -264,16 +449,9 @@ func (r *Responder) tmuxConductorWindows() []WinInfo {
 	return wins
 }
 
-func (r *Responder) hasSession(target string) bool {
-	err := exec.Command("tmux", "-L", r.socket(), "has-session", "-t", target).Run()
-	return err == nil
-}
-
-// serveViewer attaches to the target and bridges the PTY to the viewer's NATS
-// subjects until the browser disconnects, the session goes idle, or the tmux
-// target exits. Read-only (attach -r) unless the grant is ModeRW ("steer"). For a
-// window target (session:window) it attaches via a per-viewer grouped session so
-// navigating windows doesn't move the real operator's active window.
+// serveViewer opens a PTY via the configured backend and bridges it to the
+// viewer's per-viewer NATS subjects until the browser disconnects, the session
+// goes idle, or the PTY EOF. Read-only unless the grant is ModeRW.
 func (r *Responder) serveViewer(ctx context.Context, req ReqMsg, grant Grant) {
 	cols, rows := req.Cols, req.Rows
 	if cols <= 0 {
@@ -282,45 +460,11 @@ func (r *Responder) serveViewer(ctx context.Context, req ReqMsg, grant Grant) {
 	if rows <= 0 {
 		rows = 24
 	}
-	base, window := parseTarget(grant.Target)
+	base, _ := parseTarget(grant.Target)
 	writable := grant.Mode == ModeRW
 
-	// For plain sessions (no window), we drive the tmux window size directly:
-	// tmux attach -r sets ignore-size on the client, so the window stays at
-	// 80×24 even though the PTY is the right size. We work around this by
-	// issuing an explicit resize-window after attach and on every CtlResize.
-	plainSession := window == ""
-
-	// Grouped session for a specific window: shares the base session's windows but
-	// has its own current-window, so a viewer can pin a window (régisseur/maître)
-	// without yanking the operator. Torn down with the viewer.
-	attachTarget := base
-	groupName := ""
-	if window != "" {
-		groupName = session.SanitizeName("wt-" + req.ViewerID)
-		if err := exec.Command("tmux", "-L", r.socket(), "new-session", "-d", "-s", groupName, "-t", base).Run(); err == nil {
-			// Pin window-size to "manual" so the viewer's terminal dimensions never
-			// propagate to the group and resize the operator's client.
-			_ = exec.Command("tmux", "-L", r.socket(), "set-option", "-t", groupName, "window-size", "manual").Run()
-			_ = exec.Command("tmux", "-L", r.socket(), "select-window", "-t", groupName+":"+window).Run()
-			attachTarget = groupName
-		} else {
-			groupName = "" // grouping failed → fall back to attaching the base session
-		}
-	}
-
-	// attach -r = read-only; without -r keystrokes reach the session (steer).
-	args := []string{"-L", r.socket(), "attach"}
-	if !writable {
-		args = append(args, "-r")
-	}
-	args = append(args, "-t", attachTarget)
-	cmd := exec.Command("tmux", args...)
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	ptmx, cleanup, resizeFn, err := r.backend().Attach(grant.Target, cols, rows, writable)
 	if err != nil {
-		if groupName != "" {
-			_ = exec.Command("tmux", "-L", r.socket(), "kill-session", "-t", groupName).Run()
-		}
 		r.publishEnded(req.ViewerID, "attach failed")
 		return
 	}
@@ -330,32 +474,10 @@ func (r *Responder) serveViewer(ctx context.Context, req ReqMsg, grant Grant) {
 	teardown := func() {
 		teardownOnce.Do(func() {
 			cancel()
-			_ = ptmx.Close()
-			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
-			if groupName != "" {
-				_ = exec.Command("tmux", "-L", r.socket(), "kill-session", "-t", groupName).Run()
-			}
+			cleanup()
 		})
 	}
 	defer teardown()
-
-	// tmuxResizePlain drives the window to the viewer's size for plain sessions.
-	// attach -r sets ignore-size on the client, so we must push the size ourselves.
-	tmuxResizePlain := func(c, rw int) {
-		if !plainSession || c <= 0 || rw <= 0 {
-			return
-		}
-		_ = exec.Command("tmux", "-L", r.socket(), "resize-window", "-t", attachTarget,
-			"-x", strconv.Itoa(c), "-y", strconv.Itoa(rw)).Run()
-	}
-
-	// Pin window-size to manual on plain sessions so resize-window is authoritative
-	// and isn't overridden by another client joining later.
-	if plainSession {
-		_ = exec.Command("tmux", "-L", r.socket(), "set-option", "-t", attachTarget, "window-size", "manual").Run()
-		tmuxResizePlain(cols, rows)
-	}
 
 	// Idle tracking: reset on each gateway heartbeat/ctl message.
 	lastSeen := time.Now()
@@ -372,8 +494,7 @@ func (r *Responder) serveViewer(ctx context.Context, req ReqMsg, grant Grant) {
 		switch c.Type {
 		case CtlResize:
 			if c.Cols > 0 && c.Rows > 0 {
-				_ = pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(c.Cols), Rows: uint16(c.Rows)})
-				tmuxResizePlain(c.Cols, c.Rows)
+				resizeFn(c.Cols, c.Rows)
 			}
 		case CtlClose:
 			teardown()
@@ -384,7 +505,7 @@ func (r *Responder) serveViewer(ctx context.Context, req ReqMsg, grant Grant) {
 	if err != nil {
 		return
 	}
-	defer ctlSub.Unsubscribe()
+	defer ctlSub.Unsubscribe() //nolint:errcheck
 
 	// Input channel (gateway → responder): keystrokes, only for a writable grant.
 	// The gateway only forwards input when it minted a ModeRW grant, and we honor
@@ -395,7 +516,7 @@ func (r *Responder) serveViewer(ctx context.Context, req ReqMsg, grant Grant) {
 			_, _ = ptmx.Write(m.Data)
 		})
 		if ierr == nil {
-			defer inSub.Unsubscribe()
+			defer inSub.Unsubscribe() //nolint:errcheck
 		}
 	}
 
@@ -423,13 +544,13 @@ func (r *Responder) serveViewer(ctx context.Context, req ReqMsg, grant Grant) {
 	outSubject := OutSubject(r.Vignoble, req.ViewerID)
 	r.pump(viewerCtx, ptmx, outSubject)
 
-	// pump returned → PTY EOF (tmux target exited or attach ended).
+	// pump returned → PTY EOF (target exited or attach ended).
 	r.publishEnded(req.ViewerID, "session ended")
 }
 
 // pump reads PTY output and publishes it with coalescing, a bounded buffer, and
 // a per-second rate cap.
-func (r *Responder) pump(ctx context.Context, ptmx interface{ Read([]byte) (int, error) }, outSubject string) {
+func (r *Responder) pump(ctx context.Context, ptmx io.Reader, outSubject string) {
 	var mu sync.Mutex
 	pending := make([]byte, 0, maxBufBytes)
 	dropped := false
@@ -509,9 +630,8 @@ func (r *Responder) publishEnded(viewerID, reason string) {
 }
 
 // handleInterrupt sends the interrupt signal to the agent attached to base
-// (the tmux session name). It first tries to publish to the agent's NATS
-// interrupt subject (resolved via the pinard-agents KV); on failure it falls
-// back to tmux send-keys so the signal still reaches the session.
+// (the session name). It publishes to the agent's NATS interrupt subject
+// (resolved via the pinard-agents KV); on failure it is a no-op (logged).
 func (r *Responder) handleInterrupt(base string, grant Grant, viewerID string) {
 	log.Printf("[webterm-audit] action=interrupt viewer=%s vignoble=%s target=%s mode=%s",
 		viewerID, r.Vignoble, grant.Target, grant.Mode)

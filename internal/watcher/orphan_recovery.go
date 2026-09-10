@@ -70,10 +70,8 @@ func (o *OrphanRecovery) Run() {
 
 		// Skip archived parcelles
 		parcelleYaml := filepath.Join(parcellesDir, parcelle, "parcelle.yaml")
-		if data, err := os.ReadFile(parcelleYaml); err == nil {
-			if strings.Contains(string(data), "status: archived") {
-				continue
-			}
+		if cfg, err := config.LoadParcelleConfig(parcelleYaml); err == nil && cfg.Status == "archived" {
+			continue
 		}
 
 		runsDir := filepath.Join(parcellesDir, parcelle, "runs")
@@ -106,6 +104,7 @@ func (o *OrphanRecovery) Run() {
 			if o.isRunMRDone(runID) {
 				log.Printf("[orphan-recovery] Skipping %s — MR already merged (post_merge state), marking run complete", runID)
 				o.markRunCompleted(runDir, "MR merged — run no longer needed")
+				o.reapLiveSession(runID)
 				continue
 			}
 
@@ -122,6 +121,7 @@ func (o *OrphanRecovery) Run() {
 			if mrState := o.runMRState(runDir); mrState == "merged" || mrState == "closed" {
 				log.Printf("[orphan-recovery] Skipping %s — MR is %s on GitLab, marking run complete", runID, mrState)
 				o.markRunCompleted(runDir, fmt.Sprintf("MR %s — run no longer needed", mrState))
+				o.reapLiveSession(runID)
 				continue
 			}
 
@@ -133,6 +133,7 @@ func (o *OrphanRecovery) Run() {
 				// Exhausted retries — notify conductor, mark finished, stop trying
 				o.notifyExhausted(parcelle, runID)
 				o.markRunCompleted(runDir, fmt.Sprintf("exhausted %d retries", maxOrphanRetries))
+				o.reapLiveSession(runID)
 				continue
 			}
 
@@ -520,6 +521,31 @@ func (o *OrphanRecovery) markRunCompleted(runDir, reason string) {
 	rand.Read(b[:]) //nolint:errcheck
 	name := fmt.Sprintf("999999.%s.json", strings.ToUpper(hex.EncodeToString(b[:])))
 	os.WriteFile(filepath.Join(journalDir, name), data, 0o644)
+}
+
+// reapLiveSession kills the tmux session for runID if one is alive, using
+// liveness ground truth (/proc). It is the sentinel-driven safety-net: called
+// after markRunCompleted() to ensure a session that lingered past its terminal
+// sentinel is cleaned up. Never touches the conductor session or maître windows.
+func (o *OrphanRecovery) reapLiveSession(runID string) {
+	if o.Session == nil || o.Vignoble == nil {
+		return
+	}
+	sessName := liveness.WorkerForRun(o.Vignoble.Name, runID)
+	o.reapSessionByName(sessName)
+}
+
+// reapSessionByName kills the named tmux session, guarding against the conductor
+// and reserved windows. A no-op when sessName is empty.
+func (o *OrphanRecovery) reapSessionByName(sessName string) {
+	if o.Session == nil || o.Vignoble == nil {
+		return
+	}
+	if sessName == "" || sessName == "conductor" || session.IsReservedWindow(sessName) {
+		return
+	}
+	log.Printf("[orphan-recovery] Reaping live session %q (sentinel-driven)", sessName)
+	o.Session.StopWorker(o.Vignoble.Name, sessName)
 }
 
 func (o *OrphanRecovery) notifyExhausted(parcelle, runID string) {

@@ -31,7 +31,7 @@ without breaking agents.
     <li><span class="doc-figure-key charcoal">L1</span><span><strong>Store of record 🔭</strong> — documents, graph edges, and vectors share one SurrealDB store.</span></li>
     <li><span class="doc-figure-key">L2</span><span><strong>Recall ✅</strong> — typed query/fetch intent and compact boot injection.</span></li>
     <li><span class="doc-figure-key terracotta">L3</span><span><strong>Knowledge graph 🧪</strong> — temporal graph value is evaluated before commitment.</span></li>
-    <li><span class="doc-figure-key charcoal">L4</span><span><strong>Ontology 🔭</strong> — stable <code>pinard-core</code> plus specialized repository domains.</span></li>
+    <li><span class="doc-figure-key charcoal">L4</span><span><strong>Ontology ✅</strong> — declarative Go core ontology plus domain YAML extension — CLI: <code>aoc ontology validate/inspect</code>.</span></li>
     <li><span class="doc-figure-key">L5</span><span><strong>Curation & wiki ✅</strong> — a git-tracked, human-readable OKF artifact synchronized with the store.</span></li>
     <li><span class="doc-figure-key">L6</span><span><strong>Scope & promotion ✅</strong> — curated knowledge rises from vigne to vignoble to global.</span></li>
   </ol>
@@ -67,10 +67,12 @@ an embedded, file-based database — the duality that makes portable subsets pos
 (see below). It is a single static binary, which fits the HPC "no Docker"
 constraint. Agents never touch it directly; all access is through Layer 2.
 
-## Layer 2 · Recall — a typed intent API 🔭
+## Layer 2 · Recall — a typed intent API *(✅ shipped)*
 
-The memory service exposes a small, stable API over NATS request-reply — **not** raw
-queries — so the store stays swappable:
+The `memory-recall` Go binary subscribes to `pinard.<vignoble>.recall` and answers
+NATS request-reply calls with knowledge drawn from SurrealDB via semantic vector
+search (Rosetta embeddings) and structured queries. The API is small and stable —
+**not** raw queries — so the store stays swappable:
 
 - **`recall`** — semantic / vector neighbors,
 - **`lookup`** — lexical / full-text,
@@ -90,11 +92,12 @@ decision** then picks one of: keep Graphiti, build native temporal-KG in Surreal
 or adopt **Spectron** (an upcoming Graphiti-like temporal KG *on* SurrealDB) — the
 preferred long-term slot because it needs no store migration.
 
-## Layer 4 · Ontology — layered 🔭
+## Layer 4 · Ontology — layered ✅
 
-Knowledge is typed by a **two-layer ontology**: a small, stable **`pinard-core`**
+Knowledge is typed by a **two-layer ontology**: a small, stable **Go-embedded core**
 (agent-operational concepts that mirror babysitter primitives) plus a **per-repo
-domain** layer that subclasses it. See [The Ontology](/docs/memory-ontology/).
+domain** layer that subclasses it via declarative YAML files — no Pinard rebuild
+required. See [The Ontology & Domain Extension](/docs/memory-ontology/).
 
 ## Layer 5 · Curation & wiki ✅
 
@@ -121,11 +124,12 @@ human visibility. See [Scope & Promotion](/docs/memory-curation/#scope--promotio
 
 ## Status & de-risking
 
-**Shipped (Layers 0, 5, 6):** the `WikiCurator` (outbound, per-vigne namespacing,
+**Shipped (Layers 0, 4, 5, 6):** the `WikiCurator` (outbound, per-vigne namespacing,
 LLM-synthesized summaries), `WikiSyncer` (inbound), `OntologyGardener`, the vignoble
 OKF bundle scaffold, `/lesson`, `/teaching` (with retroactive modes), curate-on-promote
-(only wiki rises, vignoble-shared sync-out), and boot injection v2 (compact manifest
-with drill-down via `recall(fetch=<ref>)`) are all live.
+(only wiki rises, vignoble-shared sync-out), boot injection v2 (compact manifest
+with drill-down via `recall(fetch=<ref>)`), and the **declarative Go ontology registry**
+(core YAML + domain YAML extension + `aoc ontology validate/inspect` CLI) are all live.
 
 The remaining in-flight work is two 🧪 spikes: **(1)** Engram → SurrealDB curated
 ingestion and recall quality on 1024-d vectors (Layer 1 as the full store of record),

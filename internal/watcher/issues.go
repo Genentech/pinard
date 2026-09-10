@@ -187,22 +187,31 @@ func (w *IssueWatcher) Run() error {
 				w.recordIssue(vigneName, issue, "seen", "")
 			}
 
-			w.NATS.Publish(fmt.Sprintf("pinard.%s.issues.new", w.Vignoble.Name), map[string]any{
-				"project":     vigneName,
-				"repo":        vigne.Repo,
-				"iid":         issue.IID,
-				"title":       issue.Title,
-				"description": issue.Description,
-				"labels":      issue.Labels,
-				"url":         issue.WebURL,
-				"author":      issue.Author.Username,
-				"blocked":     blocked,
-				"spawned":     spawned,
-				"timestamp":   time.Now().UTC().Format(time.RFC3339),
-			})
-			newCount++
+			// Announce only genuinely new issues (first discovery) or a fresh spawn.
+			// Without this gate the watcher re-published issues.new for EVERY
+			// already-seen issue on EVERY poll cycle (~1/min): a blocked/discarded
+			// issue (e.g. #221) spammed the régisseur inbox forever and, via the
+			// durable deliver_policy:"all" issues consumer, re-appeared on every
+			// restart. The "publish the NATS event once" intent above was never
+			// actually enforced — this restores it.
+			if existing == nil || spawned {
+				w.NATS.Publish(fmt.Sprintf("pinard.%s.issues.new", w.Vignoble.Name), map[string]any{
+					"project":     vigneName,
+					"repo":        vigne.Repo,
+					"iid":         issue.IID,
+					"title":       issue.Title,
+					"description": issue.Description,
+					"labels":      issue.Labels,
+					"url":         issue.WebURL,
+					"author":      issue.Author.Username,
+					"blocked":     blocked,
+					"spawned":     spawned,
+					"timestamp":   time.Now().UTC().Format(time.RFC3339),
+				})
+				newCount++
 
-			log.Printf("[issue-watcher] Issue: %s #%d - %s (spawned=%v, blocked=%v)", vigneName, issue.IID, issue.Title, spawned, blocked)
+				log.Printf("[issue-watcher] Issue: %s #%d - %s (spawned=%v, blocked=%v)", vigneName, issue.IID, issue.Title, spawned, blocked)
+			}
 		}
 
 		// Forward comments on tracked issues
@@ -391,15 +400,8 @@ func (w *IssueWatcher) autoSpawnForIssue(project, repo string, issue gitlab.Issu
 	// Check parcelle.yaml for target_branch override (cuvee strategy)
 	if parcelleName != "" {
 		parcelleYaml := filepath.Join(w.Vignoble.Path, "parcelles", parcelleName, "parcelle.yaml")
-		if data, err := os.ReadFile(parcelleYaml); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				if strings.HasPrefix(strings.TrimSpace(line), "target_branch:") {
-					tb := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "target_branch:"))
-					if tb != "" {
-						targetBranch = tb
-					}
-				}
-			}
+		if cfg, err := config.LoadParcelleConfig(parcelleYaml); err == nil && cfg.TargetBranch != "" {
+			targetBranch = cfg.TargetBranch
 		}
 	}
 
@@ -473,24 +475,17 @@ func (w *IssueWatcher) findParcelleForIssue(issueIID int) string {
 	if err != nil {
 		return ""
 	}
-	issueStr := fmt.Sprintf("%d", issueIID)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(parcellesDir, entry.Name(), "parcelle.yaml"))
+		cfg, err := config.LoadParcelleConfig(filepath.Join(parcellesDir, entry.Name(), "parcelle.yaml"))
 		if err != nil {
 			continue
 		}
-		// Check if the issues list contains this IID
-		for _, line := range strings.Split(string(data), "\n") {
-			trimmed := strings.TrimSpace(line)
-			// Match "- 13" or "- 13 # comment"
-			if strings.HasPrefix(trimmed, "- "+issueStr) {
-				rest := strings.TrimPrefix(trimmed, "- "+issueStr)
-				if rest == "" || rest[0] == ' ' || rest[0] == '#' {
-					return entry.Name()
-				}
+		for _, id := range cfg.Issues {
+			if id == issueIID {
+				return entry.Name()
 			}
 		}
 	}

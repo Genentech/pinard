@@ -1,0 +1,74 @@
+[
+  {
+    "id": "fixture-obs-001",
+    "session_id": "fixture-session-1",
+    "project": "memory-parity-test",
+    "type": "rule",
+    "content": "Use JetStream for all durable event publishing — never core NATS for stream-captured subjects",
+    "created_at": "2026-01-01T00:00:00Z",
+    "confidence": 0.95
+  },
+  {
+    "id": "fixture-obs-002",
+    "session_id": "fixture-session-1",
+    "project": "memory-parity-test",
+    "type": "fact",
+    "content": "SurrealDB uses HNSW for vector search with cosine distance — index name is entity_embedding_hnsw",
+    "created_at": "2026-01-01T00:01:00Z",
+    "confidence": 0.9
+  },
+  {
+    "id": "fixture-obs-003",
+    "session_id": "fixture-session-2",
+    "project": "memory-parity-test",
+    "type": "diagnosis",
+    "content": "Memory ingester stalls when ROSETTA_URL is unreachable — falls back to no-embedding upsert after 30s timeout",
+    "created_at": "2026-01-01T00:02:00Z",
+    "confidence": 0.85
+  },
+  {
+    "id": "fixture-obs-004",
+    "session_id": "fixture-session-2",
+    "project": "memory-parity-test",
+    "type": "teaching-episode",
+    "content": "To reset the ingest cursor and force full re-ingestion, run: memory-ingester --reingest",
+    "created_at": "2026-01-01T00:03:00Z",
+    "confidence": 0.88
+  },
+  {
+    "id": "fixture-obs-005",
+    "session_id": "fixture-session-3",
+    "project": "memory-parity-test",
+    "type": "decision",
+    "content": "Go memory backend is the canonical implementation — Python services deleted in commit 94efa9d",
+    "created_at": "2026-01-01T00:04:00Z",
+    "confidence": 1.0
+  },
+  {
+    "id": "fixture-obs-006",
+    "session_id": "fixture-session-3",
+    "project": "memory-parity-test",
+    "type": "action",
+    "content": "Apply SurrealDB schema DDL before ingesting any observations — EnsureSchema is idempotent",
+    "created_at": "2026-01-01T00:05:00Z",
+    "confidence": 0.92
+  },
+  {
+    "id": "fixture-obs-007",
+    "session_id": "fixture-session-4",
+    "project": "memory-parity-test",
+    "type": "environment_condition",
+    "content": "SurrealDB must be version 2.x or later — HNSW and FULLTEXT ANALYZER are required features",
+    "created_at": "2026-01-01T00:06:00Z",
+    "confidence": 0.97
+  },
+  {
+    "id": "fixture-obs-008",
+    "session_id": "fixture-session-4",
+    "project": "memory-parity-test",
+    "type": "log_pattern",
+    "content": "ERROR: Engram HTTP fetch — connection refused — indicates ENGRAM_URL points to a stopped service",
+    "created_at": "2026-01-01T00:07:00Z",
+    "confidence": 0.8
+  }
+]

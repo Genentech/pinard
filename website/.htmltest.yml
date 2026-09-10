@@ -1,0 +1,13 @@
+# Config for htmltest (https://github.com/wjdp/htmltest) — broken-link checker.
+# Runs against the built Hugo output in ./public (build with baseURL "/" so
+# internal links stay root-relative and checkable offline).
+#   make linkcheck   (local)   ·   the `linkcheck` CI job (pipeline)
+DirectoryPath: public
+CheckInternal: true
+CheckInternalHash: true
+# External links are skipped by default (network-dependent / flaky in CI).
+# Flip to true for an occasional full audit: `htmltest` after setting this.
+CheckExternal: false
+# Missing/empty alt text is an accessibility warning, not a broken link.
+# Keep it on so we catch it too; set to true to focus purely on links.
+IgnoreAltMissing: false

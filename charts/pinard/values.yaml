@@ -219,7 +219,7 @@ memory:
     repository: ""        # the pinard image (set in custom-<env>.yaml)
     tag: ""
     pullPolicy: IfNotPresent
-  command: ["/usr/local/bin/docker-entrypoint.sh", "python", "-m", "services.memory.ingester"]
+  command: ["/usr/local/bin/docker-entrypoint.sh", "memory-ingester"]
   # ssh: bot SSH key for git access to wiki repos. Pulled from Vault via ExternalSecret.
   # sshKey: Vault property name for the private key (mounted at /secrets/ssh/<sshKey>).
   ssh:
@@ -256,6 +256,10 @@ memory:
     llmBaseUrl: "https://aiplatform.googleapis.com/v1beta1/projects/gcp-p-germline-ovf6s/locations/global/endpoints/openapi"
     # Engram source: 'http' (local dev, default) or 'postgres' (EKS cloud RDS direct read)
     engramSource: "http"
+    # Comma-separated group_ids to ingest (optional filter/override).
+    # Leave empty (default) for full auto-discovery from cloud_mutations (postgres source)
+    # or vignes.yaml (http source). Set to restrict ingest to a subset during debugging.
+    groupIds: ""
     # Parent dir of vignoble clones (e.g. /data/repos/vignobles). Required in production;
     # empty here so local dev can opt out. Set explicitly in custom-<env>.yaml.
     vignobleBaseDir: ""
@@ -293,6 +297,23 @@ memory:
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { cpu: "1", memory: 512Mi }
+  recall:
+    enabled: true
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: "1", memory: 512Mi }
+  rollup:
+    enabled: true
+    interval: "1h"     # ROLLUP_INTERVAL; empty/0 = one-shot (CI)
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 512Mi }
+  curator:
+    enabled: true
+    interval: "2h"     # CURATOR_INTERVAL; empty/0 = one-shot
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 512Mi }
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -325,6 +346,7 @@ graphiti:
       requests: { cpu: 100m, memory: 256Mi }
       limits: { cpu: "1", memory: 512Mi }
     extraEnv: []
+    command: []        # override container command; empty → use image ENTRYPOINT
   service:
     type: ClusterIP
     falkordbPort: 6379

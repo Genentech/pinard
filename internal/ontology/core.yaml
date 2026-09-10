@@ -1,0 +1,152 @@
+# pinard-core ontology — declarative, JSON-Schema-typed.
+# This file is embedded in the pinard binary and defines the base entity/edge
+# types shared by all vigne/vignoble scopes.
+# Version matches packages/pinard-core CORE_VERSION.
+domain: pinard-core
+version: "1.0.0"
+group_ids: []  # core: applies to all group_ids as the base layer
+
+entities:
+  task:
+    description: "A unit of work dispatched to a babysitter process"
+    properties:
+      effect_id: {type: string, description: "Babysitter effect ID (effectId)"}
+      process:   {type: string, description: "Babysitter process name (e.g. 'swe')"}
+      status:
+        type: string
+        description: "Lifecycle status"
+        enum: [pending, running, done, failed]
+    required: []
+
+  step:
+    description: "A sub-unit within a Task — one concrete action the agent takes"
+    properties:
+      task_name: {type: string, description: "Name of the parent Task"}
+      tool:      {type: string, description: "Tool invoked in this step"}
+      outcome:   {type: string, description: "Short description of the step result"}
+    required: []
+
+  verdict:
+    description: "A binary or graded judgment produced by the agent or the harness"
+    properties:
+      passed:     {type: boolean, description: "True if the verdict is positive/passing"}
+      rationale:  {type: string, description: "Explanation for the verdict"}
+      confidence: {type: number, minimum: 0.0, maximum: 1.0}
+    required: [passed]
+
+  decision:
+    description: "A deliberate choice made by the agent at a decision point"
+    properties:
+      options_considered: {type: array, description: "Options that were evaluated"}
+      chosen:    {type: string, description: "The option that was selected"}
+      rationale: {type: string, description: "Reasoning behind the choice"}
+    required: []
+
+  gate:
+    description: "A breakpoint that must be cleared before work continues"
+    properties:
+      condition: {type: string, description: "Condition that must hold to pass"}
+      passed:    {type: boolean, description: "Whether the gate was passed"}
+    required: []
+
+  action:
+    description: "A concrete action executed by the agent (tool call, command, API call)"
+    properties:
+      tool:           {type: string, description: "Tool or command name"}
+      parameters:     {type: object, description: "Input parameters"}
+      result_summary: {type: string, description: "Short summary of the action result"}
+      success:        {type: boolean, description: "Whether the action succeeded"}
+    required: []
+
+  diagnosis:
+    description: "An identified root cause or failure mode"
+    properties:
+      symptom:    {type: string, description: "Observable symptom that triggered diagnosis"}
+      root_cause: {type: string, description: "Inferred root cause"}
+      confidence: {type: number, minimum: 0.0, maximum: 1.0}
+    required: []
+
+  log_pattern:
+    description: "A recurring pattern in logs that signals a known condition"
+    properties:
+      pattern:  {type: string, description: "Regex or literal pattern string"}
+      signals:  {type: string, description: "What condition this pattern signals"}
+      example:  {type: string, description: "Representative log line example"}
+    required: []
+
+  environment_condition:
+    description: "An observable state of the execution environment"
+    properties:
+      metric:    {type: string, description: "Metric name (e.g. 'memory_used_gb')"}
+      value:     {type: string, description: "Observed value as string"}
+      threshold: {type: string, description: "Threshold that defines the condition"}
+      breached:  {type: boolean, description: "True if the threshold was exceeded"}
+    required: []
+
+  artifact:
+    description: "A durable output produced or consumed by agent work"
+    properties:
+      path:          {type: string, description: "Filesystem or object-store path"}
+      artifact_type: {type: string, description: "Type label (e.g. 'parquet', 'checkpoint')"}
+      size_bytes:    {type: integer, minimum: 0, description: "Size in bytes (0 = unknown)"}
+    required: []
+
+edges:
+  DependsOn:
+    description: "Entity A depends on entity B before it can proceed"
+    pairs:
+      - [task, task]
+      - [task, gate]
+      - [step, step]
+      - [step, artifact]
+      - [action, artifact]
+      - [action, environment_condition]
+
+  Produces:
+    description: "Entity A produces entity B as an output"
+    pairs:
+      - [task, artifact]
+      - [step, artifact]
+      - [action, artifact]
+      - [action, verdict]
+      - [step, verdict]
+
+  Consumes:
+    description: "Entity A consumes entity B as an input"
+    pairs:
+      - [task, artifact]
+      - [step, artifact]
+      - [action, artifact]
+      - [action, environment_condition]
+
+  IndicatesProblem:
+    description: "Entity A (LogPattern) indicates a problem entity B (Diagnosis)"
+    pairs:
+      - [log_pattern, diagnosis]
+      - [environment_condition, diagnosis]
+      - [verdict, diagnosis]
+
+  ResolvedBy:
+    description: "Entity A (problem/Diagnosis) is resolved by entity B (Action/Step)"
+    pairs:
+      - [diagnosis, action]
+      - [diagnosis, step]
+      - [diagnosis, task]
+
+  RequiresCondition:
+    description: "Entity A requires EnvironmentCondition B to hold"
+    pairs:
+      - [task, environment_condition]
+      - [step, environment_condition]
+      - [gate, environment_condition]
+      - [action, environment_condition]
+
+  TriggersDecision:
+    description: "Entity A triggers Decision B"
+    pairs:
+      - [gate, decision]
+      - [environment_condition, decision]
+      - [verdict, decision]
+      - [diagnosis, decision]
+
+suppressed: []

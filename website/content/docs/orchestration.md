@@ -61,14 +61,65 @@ See [Memory & Recall](/docs/memory/) for details.
 - **Attach** with `aoc maitre attach --parcelle <name>` (spawns the window if missing,
   then switches to it), the `/parcelle <name>` command, or the `attach_parcelle` tool.
 - **Steer** a maître by typing in its tmux window.
-- **Liveness** is the daemon's job: it ensures a window exists for every parcelle with
+- **Liveness** is the daemon’s job: it ensures a window exists for every parcelle with
   live work while the `conductor` session is running.
+
+### Maître ↔ Régisseur communication
+
+Maîtres and the régisseur communicate through two complementary tools:
+
+**`report_to_regisseur`** (maître-only) — the maître calls this when something
+significant happens (vendangeur completed, MR opened or merged, gate pending, blocker
+hit) or whenever it judges the régisseur would benefit from an update. The call
+publishes a structured status block and also upserts a KV snapshot so a late-joining
+régisseur can catch up without missing messages.
+
+```
+recent completions:
+  • #228 boot-index — MR !312 opened
+pending gates:
+  • my-project-build breakpoint awaiting approval
+current focus:
+  Re-running nightly ingestion after SurrealDB schema fix
+(updated 4m ago)
+```
+
+**`get_maitre_status`** (régisseur-only) — two modes:
+
+- **Named-parcelle mode** (`parcelle="<name>"`) — triggers the target maître's LLM
+  to author and send a fresh structured report via `report_to_regisseur`, then returns
+  the result. Waits up to **35 seconds**. An optional `context` parameter focuses
+  the report (e.g. `context="regarding CI stability"`). On timeout, falls back to
+  cached KV facts with an explicit staleness note.
+- **Board mode** (no `parcelle`) — reads all maître status snapshots from the KV
+  store and renders a compact, multi-block overview sorted by most-recently-updated.
+  Snapshots older than 15 minutes are flagged as **[STALE]**.
+
+Use named-parcelle mode when you need a fresh, LLM-authored assessment from a specific
+workstream; use board mode for a quick vignoble-wide overview.
+
+**Operator relay** — the régisseur has built-in guidance for relaying operator
+messages to specific maîtres:
+1. Use `get_maitre_status` (board mode or named-parcelle) to identify active parcelles
+   and disambiguate when a topic spans multiple workstreams.
+2. **Offer** — do not auto-relay. The régisseur asks, e.g.: *"Want me to bring the
+   `memory` maître up to speed on this?"*
+3. After confirmation, send a tailored message per target maître with one of:
+   ```bash
+   # Via send_message (maître shorthand — fire-and-forget, no btw round-trip)
+   send_message(session="parcelle:<parcelle>", message="<tailored message>")
+   # Or via aoc notify
+   aoc notify --parcelle <parcelle> "<tailored message>"
+   ```
+   One call per target. Both routes deliver to the maître's notifications subject.
+   `send_message` with `parcelle:<name>` is fire-and-forget (btw round-trip is not
+   supported for maîtres); use it for one-off relay; use `aoc notify --parcelle`
+   from shell scripts or when you need explicit confirmation of delivery.
 
 ### Vendangeur (worker)
 
 The harvester — see [Overview](/docs/overview/) for the naming. Each vendangeur takes one
-task in its own git worktree, opens an MR, and is reaped when it merges. Its full life is
-covered in the [Merge Request Workflow](/docs/mr-workflow/).
+task in its own git worktree, opens an MR, and is reaped when it merges.
 
 ## Parcelles
 

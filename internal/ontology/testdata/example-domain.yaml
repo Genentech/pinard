@@ -1,0 +1,96 @@
+# Example domain ontology — reference fixture proving the pinard extension mechanism.
+#
+# This file ships with pinard as a worked example of how a downstream project
+# registers a domain ontology. Copy it to your project's
+# pinard/ontology/<domain>.yaml, adapt the entities/edges, and set
+# PINARD_ONTOLOGY_DIRS to the containing directory.
+#
+# Structural coverage:
+#   - one Task subtype    (batch_job     — is_a task)
+#   - one Decision subtype(shard_decision — is_a decision)
+#   - one Artifact subtype(output_file   — is_a artifact)
+#   - one CoreEntity      (provenance_record — no is_a, plain new entity)
+#   - edge map extensions (DependsOn/Produces/Consumes/TriggersDecision extended)
+#   - new domain-specific edges (ProcessesOutput, RecordedBy)
+domain: example
+version: "1.0.0"
+group_ids:
+  - example-build
+  - example-release
+
+entities:
+  batch_job:
+    is_a: task
+    description: "A batch compute job submitted to an HPC scheduler — is-a Task."
+    properties:
+      job_id:    {type: string,  description: "Scheduler-assigned job ID"}
+      job_name:  {type: string,  description: "Human-readable job name"}
+      partition: {type: string,  description: "Scheduler partition the job ran on"}
+      node_count:{type: integer, minimum: 0, description: "Number of nodes allocated"}
+    required: []
+
+  shard_decision:
+    is_a: decision
+    description: "A decision about whether to open a new storage shard — is-a Decision."
+    properties:
+      shard_num:   {type: integer, minimum: 0, description: "Current shard index"}
+      item_count:  {type: integer, minimum: 0, description: "Number of items in the current shard"}
+      threshold:   {type: integer, minimum: 0, description: "Capacity threshold that triggered the decision"}
+    required: []
+
+  output_file:
+    is_a: artifact
+    description: "A durable output file produced by a pipeline step — is-a Artifact."
+    properties:
+      file_id:     {type: string,  description: "Unique file identifier or accession"}
+      format:      {type: string,  description: "File format (e.g. parquet, vcf, csv)"}
+      record_count:{type: integer, minimum: 0, description: "Number of records in the file"}
+    required: []
+
+  provenance_record:
+    description: "A provenance record tracking lineage of a pipeline operation."
+    properties:
+      source:        {type: string, description: "Input source identifier (file path or ID)"}
+      pipeline_step: {type: string, description: "Pipeline step name"}
+      timestamp:     {type: string, format: date-time, description: "ISO-8601 timestamp"}
+    required: []
+
+edges:
+  # Extend core edges with domain-specific (source, target) pairs.
+  DependsOn:
+    description: "Extend core DependsOn: batch_job depends on output_file or provenance_record"
+    pairs:
+      - [batch_job, output_file]
+      - [batch_job, provenance_record]
+
+  Produces:
+    description: "Extend core Produces: batch_job produces provenance_record or output_file"
+    pairs:
+      - [batch_job, provenance_record]
+      - [batch_job, output_file]
+
+  Consumes:
+    description: "Extend core Consumes: batch_job consumes output_file"
+    pairs:
+      - [batch_job, output_file]
+
+  TriggersDecision:
+    description: "Extend core TriggersDecision: batch_job or environment_condition triggers shard_decision"
+    pairs:
+      - [batch_job, shard_decision]
+      - [environment_condition, shard_decision]
+
+  # New domain-specific edges.
+  ProcessesOutput:
+    description: "A batch_job or pipeline step processes an output_file"
+    pairs:
+      - [batch_job, output_file]
+      - [step, output_file]
+
+  RecordedBy:
+    description: "An artifact or output_file is recorded by a provenance_record"
+    pairs:
+      - [output_file, provenance_record]
+      - [artifact, provenance_record]
+
+suppressed: []

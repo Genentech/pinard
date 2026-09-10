@@ -29,6 +29,10 @@ var daemonCmd = &cobra.Command{
 
 		kv := pnats.NewKV(nc)
 
+		if err := kv.EnsureBucket(pnats.KVNameMaitreStatus); err != nil {
+			log.Printf("[daemon] EnsureBucket %s failed (non-fatal): %v", pnats.KVNameMaitreStatus, err)
+		}
+
 		mrState, err := state.Load[state.MRWatcherState](filepath.Join(vb.StateDir, "mr-watcher.yaml"))
 		if err != nil {
 			return err
@@ -173,6 +177,15 @@ var daemonCmd = &cobra.Command{
 		go tick(ctx, "issue-watcher", 60*time.Second, func() { issueWatcher.Run() })
 		go tick(ctx, "capsule-poller", watcher.CapsulePollInterval(), func() { capsulePoller.Run() })
 		go tick(ctx, "scheduler", 60*time.Second, func() { scheduler.Run() })
+
+		// Remote mirror: maintain local tmux mirror sessions for remote agents so
+		// they appear in `tmux ls` without manual `aoc attach` per agent.
+		remoteMirror := &watcher.RemoteMirrorWatcher{
+			Vignoble: vb,
+			KV:       kv,
+			AOCBin:   mustFindAOC(),
+		}
+		go tick(ctx, "remote-mirror", 30*time.Second, func() { remoteMirror.Run() })
 
 		// Orphan run recovery: scan parcelles for incomplete runs without active workers
 		orphanRecovery := &watcher.OrphanRecovery{

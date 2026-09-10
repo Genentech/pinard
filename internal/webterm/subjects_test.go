@@ -18,7 +18,5 @@ func TestSubjectFormats(t *testing.T) {
 	if got := EvtSubject("huge", "v1"); got != "pinard.huge.webterm.v1.evt" {
 		t.Errorf("EvtSubject = %q", got)
 	}
-	if got := PtyOutSubject("huge", "myparc--proj-abc1"); got != "pinard.huge.agents.myparc--proj-abc1.pty.out" {
-		t.Errorf("PtyOutSubject = %q", got)
-	}
+
 }

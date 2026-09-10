@@ -1,6 +1,7 @@
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { execSync } from "node:child_process";
+import { hostname } from "node:os";
 import { readIssueTool, updateIssueTool, trackMrTool } from "../shared/tools.js";
 import { connect, wsconnect, type NatsConnection, type Subscription } from "@nats-io/transport-node";
 import WebSocket from "ws";
@@ -22,6 +23,8 @@ const RUN_ID = process.env.BABYSITTER_RUN_ID || "";
 // are ALWAYS parcelle-scoped, so PARCELLE must never be empty.
 const PARCELLE = process.env.BABYSITTER_PARCELLE || PROJECT;
 const ISSUE_URL = process.env.PINARD_ISSUE_URL || "";
+const IS_STANDALONE = process.env.PINARD_STANDALONE === "1";
+const HOST = hostname();
 const AOC = "aoc";
 
 // For process-governed workers, use run ID as the stable NATS agent identifier.
@@ -201,7 +204,7 @@ async function publishState(state: string, tempo: string, step?: string): Promis
         // Carry forward any fields not written by this worker.
         const workerFields = new Set([
           "project", "name", "agentId", "runId", "process", "parcelle",
-          "state", "tempo", "step", "cwd", "vignoble", "issueUrl", "lastSeen",
+          "state", "tempo", "step", "cwd", "vignoble", "issueUrl", "host", "standalone", "lastSeen",
         ]);
         for (const [k, v] of Object.entries(parsed)) {
           if (!workerFields.has(k)) preserved[k] = v;
@@ -222,6 +225,8 @@ async function publishState(state: string, tempo: string, step?: string): Promis
       cwd: process.cwd(),
       vignoble: VIGNOBLE,
       issueUrl: ISSUE_URL || undefined,
+      host: HOST,
+      standalone: IS_STANDALONE || undefined,
       lastSeen: new Date().toISOString(),
     }));
   } catch {}

@@ -174,7 +174,29 @@ doesn't exist (warns instead of aborting), so optional bind mounts (e.g., cert d
 that only exist on some cluster nodes) can be declared in `vignes.yaml` without failing
 the launch on nodes that lack them.
 
+## Auto-mirroring in the control room
+
+The daemon **automatically creates local tmux mirror sessions** for agents that are
+running on remote hosts. Every 30 seconds it checks the `pinard-agents` KV for
+agents whose session is absent from the local tmux socket; for each such agent it
+spawns a `tmux new-session` running `aoc attach <name>` so you can see remote
+vendangeurs in `tmux ls` without manually running `aoc attach` per agent.
+
+Mirrors are torn down automatically when the KV entry disappears or the agent
+reaches a terminal state (`stopped`, `completed`, `failed`). If `aoc attach` exits
+while the agent is still listed as live in KV, the mirror is respawned.
+
+This means remote agents appear alongside local agents in the conductor control room
+without any manual setup.
+
 ## Watching a remote worker
 
-Run `aoc webterm-responder` on the remote host and use the [Web Terminal](/docs/web-terminal/)
-to watch it from a browser — no SSH required.
+For daemon-less or Singularity workers that have **no tmux** available, the launcher
+automatically starts `aoc webterm-worker-responder` — a PTY responder that bridges
+the worker's own controlling terminal over NATS using the same grant-gated protocol
+as the tmux-backed responder. No tmux, no extra process: the worker's own PTY
+becomes the viewable/steerable terminal.
+
+For workers *with* tmux, run `aoc webterm-responder` on the remote host. In both
+cases use the [Web Terminal](/docs/web-terminal/) to watch from a browser — no SSH
+required.

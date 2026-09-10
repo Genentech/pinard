@@ -1,0 +1,3 @@
+#!/bin/sh
+port="${ENGRAM_PORT:-7437}"
+exec wget -q --spider "http://127.0.0.1:${port}/health" 2>/dev/null

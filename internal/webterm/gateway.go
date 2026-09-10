@@ -420,12 +420,13 @@ func (g *Gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 // ── Control-room index APIs (operator-gated) ──────────────────
 
 type sessionEntry struct {
-	Name     string `json:"name"`
-	Target   string `json:"target"`
-	Parcelle string `json:"parcelle,omitempty"`
-	State    string `json:"state,omitempty"`
-	Step     string `json:"step,omitempty"`
-	Remote   bool   `json:"remote,omitempty"`
+	Name        string `json:"name"`
+	Target      string `json:"target"`
+	Parcelle    string `json:"parcelle,omitempty"`
+	State       string `json:"state,omitempty"`
+	Step        string `json:"step,omitempty"`
+	Remote      bool   `json:"remote,omitempty"`
+	Unreachable bool   `json:"unreachable,omitempty"`
 }
 
 type sessionIndex struct {
@@ -477,11 +478,7 @@ func (g *Gateway) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		// No live responder — still surface remote KV agents so they're visible
 		// even when the daemon's webterm responder is down.
 		idx := g.buildIndex(v, ListReply{})
-		if len(idx.Vendangeurs) == 0 {
-			idx.Note = "no responder"
-		} else {
-			idx.Note = "no local responder (remote agents from KV)"
-		}
+			idx.Note = "no local responder"
 		_ = json.NewEncoder(w).Encode(idx)
 		return
 	}
@@ -584,7 +581,11 @@ func (g *Gateway) buildIndex(v string, reply ListReply) sessionIndex {
 				if err != nil || time.Since(lastSeenAt) > agentLivenessThreshold {
 					continue // stale
 				}
-				e := sessionEntry{Name: name, Target: name, Remote: true}
+				// Determine locality from the KV record's standalone marker.
+				// standalone=true → genuinely remote (HPC/SIF, no local daemon).
+				// standalone absent/false → local agent whose responder is down.
+				isStandalone, _ := rec["standalone"].(bool)
+				e := sessionEntry{Name: name, Target: name, Remote: isStandalone, Unreachable: !isStandalone}
 				if pfx, _, ok := strings.Cut(name, "--"); ok {
 					e.Parcelle = pfx
 				} else if p, ok := rec["parcelle"].(string); ok {

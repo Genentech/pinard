@@ -40,6 +40,15 @@ serve:
 build:
 	hugo --minify
 
+# ── Link check ───────────────────────────────────
+
+# Build the site (baseURL "/") and check for broken links + missing alt text.
+# Uses htmltest via `go run` so no separate install is needed.
+HTMLTEST_VERSION ?= v0.17.0
+linkcheck:
+	hugo --minify -d public
+	go run github.com/wjdp/htmltest@$(HTMLTEST_VERSION)
+
 clean:
 	rm -rf public/ resources/
 
@@ -51,4 +60,4 @@ release: image push
 # Build + push to local k3d registry
 dev-release: image dev-push
 
-.PHONY: image push dev-push serve build clean release dev-release
+.PHONY: image push dev-push serve build linkcheck clean release dev-release

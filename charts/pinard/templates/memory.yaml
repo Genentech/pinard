@@ -70,8 +70,8 @@ data:
         User git
         IdentityFile /secrets/ssh/{{ $sshKey }}
         IdentitiesOnly yes
-  known_hosts: |
-    {{ $sshKnownHosts }}
+  known_hosts: |-
+    {{- $sshKnownHosts | nindent 4 }}
 {{- end }}
 {{- if $c.vault.enabled }}
 {{- $v := $c.vault }}
@@ -155,7 +155,7 @@ spec:
               cp /etc/ssh-config/known_hosts ~/.ssh/known_hosts
               git config --global user.name "pinard"
               git config --global user.email "{{ $gitEmail }}"
-              python -m services.memory.wiki.clone_vignobles
+              exec memory-ingester clone-vignobles
           env:
             - name: CLONE_BASE_DIR
               value: {{ $cloneDir | quote }}
@@ -197,10 +197,10 @@ spec:
             {{- end }}
       {{- end }}
       containers:
-        - name: memory
+        - name: ingester
           image: "{{ $c.image.repository }}:{{ $c.image.tag | default $.Chart.AppVersion }}"
           imagePullPolicy: {{ $c.image.pullPolicy }}
-          command: {{ toYaml $c.command | nindent 12 }}
+          command: ["/usr/local/bin/docker-entrypoint.sh", "memory-ingester"]
           env:
             - name: SURREAL_URL
               value: "http://{{ $surrealName }}:8000"
@@ -231,6 +231,10 @@ spec:
               value: {{ $c.config.natsVignoble | quote }}
             - name: MEMORY_ENGRAM_SOURCE
               value: {{ $c.config.engramSource | default "http" | quote }}
+            {{- if $c.config.groupIds }}
+            - name: MEMORY_GROUP_IDS
+              value: {{ $c.config.groupIds | quote }}
+            {{- end }}
             {{- if $c.config.vignobleBaseDir }}
             - name: VIGNOBLES_BASE_DIR
               value: {{ $c.config.vignobleBaseDir | quote }}
@@ -319,6 +323,247 @@ spec:
             {{- end }}
           resources:
             {{- toYaml $c.resources | nindent 12 }}
+{{- if and $c.recall $c.recall.enabled }}
+        - name: recall
+          image: "{{ $c.image.repository }}:{{ $c.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command: ["/usr/local/bin/docker-entrypoint.sh", "memory-recall"]
+          env:
+            - name: SURREAL_URL
+              value: "http://{{ $surrealName }}:8000"
+            - name: SURREAL_USER
+              value: {{ $c.config.surrealUser | quote }}
+            - name: SURREAL_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if $c.vault.enabled }}{{ $vaultSecretName }}{{ else }}{{ $secretName }}{{ end }}
+                  key: root-pass
+            - name: ENGRAM_URL
+              value: {{ $c.config.engramUrl | quote }}
+            - name: ROSETTA_URL
+              value: {{ $c.config.rosettaUrl | quote }}
+            {{- if $hasNatsCreds }}
+            - name: NATS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $vaultSecretName }}
+                  key: nats-password
+            - name: NATS_URL
+              value: {{ printf "nats://%s:$(NATS_PASSWORD)@%s" $c.config.natsUser (trimPrefix "nats://" $c.config.natsUrl) | quote }}
+            {{- else }}
+            - name: NATS_URL
+              value: {{ $c.config.natsUrl | quote }}
+            {{- end }}
+            - name: NATS_VIGNOBLE
+              value: {{ $c.config.natsVignoble | quote }}
+            - name: MEMORY_LLM_API
+              value: {{ $c.config.llmApi | quote }}
+            - name: MEMORY_LLM_AUTH
+              value: {{ $c.config.llmAuth | quote }}
+            - name: MEMORY_LLM_MODEL
+              value: {{ $c.config.llmModel | quote }}
+            - name: MEMORY_LLM_BASE_URL
+              value: {{ $c.config.llmBaseUrl | quote }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/secrets/gemini/sa.json"
+            - name: VIGNOBLE_LOGS
+              value: "/tmp/memory-logs"
+            - name: SSL_CERT_FILE
+              value: {{ $c.config.sslCertFile | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+            - name: REQUESTS_CA_BUNDLE
+              value: {{ $c.config.requestsCaBundle | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+            {{- if $hasCaBundle }}
+            - name: EXTRA_CA_CERTS
+              value: {{ $caBundleCertFile | quote }}
+            {{- end }}
+          volumeMounts:
+            {{- if $c.vault.enabled }}
+            - name: gemini-sa
+              mountPath: /secrets/gemini
+              readOnly: true
+            {{- end }}
+            {{- if $hasCaBundle }}
+            - name: ca-bundle
+              mountPath: {{ $caBundleMountPath | quote }}
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- if and $c.recall $c.recall.resources }}
+            {{- toYaml $c.recall.resources | nindent 12 }}
+            {{- else }}
+            {{- toYaml $c.resources | nindent 12 }}
+            {{- end }}
+{{- end }}
+{{- if and $c.rollup $c.rollup.enabled }}
+        - name: rollup
+          image: "{{ $c.image.repository }}:{{ $c.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command: ["/usr/local/bin/docker-entrypoint.sh", "memory-rollup"]
+          env:
+            - name: SURREAL_URL
+              value: "http://{{ $surrealName }}:8000"
+            - name: SURREAL_USER
+              value: {{ $c.config.surrealUser | quote }}
+            - name: SURREAL_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if $c.vault.enabled }}{{ $vaultSecretName }}{{ else }}{{ $secretName }}{{ end }}
+                  key: root-pass
+            - name: ROSETTA_URL
+              value: {{ $c.config.rosettaUrl | quote }}
+            {{- if $hasNatsCreds }}
+            - name: NATS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $vaultSecretName }}
+                  key: nats-password
+            - name: NATS_URL
+              value: {{ printf "nats://%s:$(NATS_PASSWORD)@%s" $c.config.natsUser (trimPrefix "nats://" $c.config.natsUrl) | quote }}
+            {{- else }}
+            - name: NATS_URL
+              value: {{ $c.config.natsUrl | quote }}
+            {{- end }}
+            - name: NATS_VIGNOBLE
+              value: {{ $c.config.natsVignoble | quote }}
+            - name: MEMORY_LLM_API
+              value: {{ $c.config.llmApi | quote }}
+            - name: MEMORY_LLM_AUTH
+              value: {{ $c.config.llmAuth | quote }}
+            - name: MEMORY_LLM_MODEL
+              value: {{ $c.config.llmModel | quote }}
+            - name: MEMORY_LLM_BASE_URL
+              value: {{ $c.config.llmBaseUrl | quote }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/secrets/gemini/sa.json"
+            - name: VIGNOBLE_LOGS
+              value: "/tmp/memory-logs"
+            - name: SSL_CERT_FILE
+              value: {{ $c.config.sslCertFile | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+            - name: REQUESTS_CA_BUNDLE
+              value: {{ $c.config.requestsCaBundle | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+            {{- if $hasCaBundle }}
+            - name: EXTRA_CA_CERTS
+              value: {{ $caBundleCertFile | quote }}
+            {{- end }}
+            {{- if $c.config.vignobleBaseDir }}
+            - name: VIGNOBLES_BASE_DIR
+              value: {{ $c.config.vignobleBaseDir | quote }}
+            {{- else if $hasSsh }}
+            - name: VIGNOBLE_DIR
+              value: {{ $vignobleCloneDir | quote }}
+            {{- else if $hasVignes }}
+            - name: VIGNOBLE_DIR
+              value: {{ $c.vignes.mountPath | default "/etc/pinard" | quote }}
+            {{- end }}
+            {{- if and $c.rollup $c.rollup.interval }}
+            - name: ROLLUP_INTERVAL
+              value: {{ $c.rollup.interval | quote }}
+            {{- end }}
+          volumeMounts:
+            {{- if $c.vault.enabled }}
+            - name: gemini-sa
+              mountPath: /secrets/gemini
+              readOnly: true
+            {{- end }}
+            {{- if $hasVignes }}
+            - name: vignes-config
+              mountPath: {{ $c.vignes.mountPath | default "/etc/pinard" | quote }}
+              readOnly: true
+            {{- end }}
+            {{- if $hasSsh }}
+            - name: repos
+              mountPath: {{ $cloneDir | quote }}
+            {{- end }}
+            {{- if $hasCaBundle }}
+            - name: ca-bundle
+              mountPath: {{ $caBundleMountPath | quote }}
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- if and $c.rollup $c.rollup.resources }}
+            {{- toYaml $c.rollup.resources | nindent 12 }}
+            {{- else }}
+            {{- toYaml $c.resources | nindent 12 }}
+            {{- end }}
+{{- end }}
+{{- if and $c.curator $c.curator.enabled }}
+        - name: curator
+          image: "{{ $c.image.repository }}:{{ $c.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command: ["/usr/local/bin/docker-entrypoint.sh", "memory-curator"]
+          env:
+            - name: SURREAL_URL
+              value: "http://{{ $surrealName }}:8000"
+            - name: SURREAL_USER
+              value: {{ $c.config.surrealUser | quote }}
+            - name: SURREAL_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if $c.vault.enabled }}{{ $vaultSecretName }}{{ else }}{{ $secretName }}{{ end }}
+                  key: root-pass
+            - name: ROSETTA_URL
+              value: {{ $c.config.rosettaUrl | quote }}
+            - name: MEMORY_LLM_API
+              value: {{ $c.config.llmApi | quote }}
+            - name: MEMORY_LLM_AUTH
+              value: {{ $c.config.llmAuth | quote }}
+            - name: MEMORY_LLM_MODEL
+              value: {{ $c.config.llmModel | quote }}
+            - name: MEMORY_LLM_BASE_URL
+              value: {{ $c.config.llmBaseUrl | quote }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/secrets/gemini/sa.json"
+            - name: SSL_CERT_FILE
+              value: {{ $c.config.sslCertFile | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+            - name: REQUESTS_CA_BUNDLE
+              value: {{ $c.config.requestsCaBundle | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
+            {{- if $hasCaBundle }}
+            - name: EXTRA_CA_CERTS
+              value: {{ $caBundleCertFile | quote }}
+            {{- end }}
+            {{- if $c.config.vignobleBaseDir }}
+            - name: VIGNOBLES_BASE_DIR
+              value: {{ $c.config.vignobleBaseDir | quote }}
+            {{- else if $hasSsh }}
+            - name: VIGNOBLE_DIR
+              value: {{ $vignobleCloneDir | quote }}
+            {{- else if $hasVignes }}
+            - name: VIGNOBLE_DIR
+              value: {{ $c.vignes.mountPath | default "/etc/pinard" | quote }}
+            {{- end }}
+            {{- if and $c.curator $c.curator.interval }}
+            - name: CURATOR_INTERVAL
+              value: {{ $c.curator.interval | quote }}
+            {{- end }}
+            - name: WIKI_CLONE_DIR
+              value: {{ $cloneDir | quote }}
+          volumeMounts:
+            {{- if $c.vault.enabled }}
+            - name: gemini-sa
+              mountPath: /secrets/gemini
+              readOnly: true
+            {{- end }}
+            {{- if $hasVignes }}
+            - name: vignes-config
+              mountPath: {{ $c.vignes.mountPath | default "/etc/pinard" | quote }}
+              readOnly: true
+            {{- end }}
+            {{- if $hasSsh }}
+            - name: repos
+              mountPath: {{ $cloneDir | quote }}
+            {{- end }}
+            {{- if $hasCaBundle }}
+            - name: ca-bundle
+              mountPath: {{ $caBundleMountPath | quote }}
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- if and $c.curator $c.curator.resources }}
+            {{- toYaml $c.curator.resources | nindent 12 }}
+            {{- else }}
+            {{- toYaml $c.resources | nindent 12 }}
+            {{- end }}
+{{- end }}
       volumes:
         {{- if $c.vault.enabled }}
         - name: gemini-sa
