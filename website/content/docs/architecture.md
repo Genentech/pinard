@@ -20,7 +20,7 @@ why an agent can run from any network (or another machine) with only outbound NA
 | **Launcher** | `bin/pinard` | shell script | — |
 
 The **daemon is always running**; the **régisseur/maîtres are optional** LLM layers. See
-[Orchestration & Parcelles](/docs/orchestration/) for how the three conductor tiers relate.
+[Orchestration & Parcelles](docs/orchestration/) for how the three conductor tiers relate.
 
 ## The daemon
 
@@ -41,7 +41,7 @@ and `schedules.yaml`, and `exec`s itself in place on any change (same PID, same 
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="/images/docs/architecture-nats-topology.jpg" alt="A hand-drawn topology with civilian vineyard planners and estate managers above a central NATS pipe, worker processes at its sides, and daemon watchers below it.">
+    <img src="images/docs/architecture-nats-topology.jpg" alt="A hand-drawn topology with civilian vineyard planners and estate managers above a central NATS pipe, worker processes at its sides, and daemon watchers below it.">
     <span class="doc-figure-label charcoal" style="--x: 50%; --y: 4%;">Régisseur & maîtres</span>
     <span class="doc-figure-label terracotta" style="--x: 8%; --y: 40%;">Vendangeurs</span>
     <span class="doc-figure-label terracotta" style="--x: 92%; --y: 40%;">Vendangeurs</span>

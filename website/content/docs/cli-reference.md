@@ -10,7 +10,7 @@ workers).
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="/images/docs/cli-command-map-v2.jpg" alt="A cellar tool board with six independent command-family stations: launcher, estate setup, runtime, observation, remote and funding, and administration. The stations are categories, not sequential steps.">
+    <img src="images/docs/cli-command-map-v2.jpg" alt="A cellar tool board with six independent command-family stations: launcher, estate setup, runtime, observation, remote and funding, and administration. The stations are categories, not sequential steps.">
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 18%; --y: 43%;"><strong>L · Launcher</strong><br><code>pinard</code> · <code>--maitre</code> · <code>--worker</code></span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 50%; --y: 43%;"><strong>E · Estate setup</strong><br><code>init</code> · <code>add vigne</code> · <code>config</code></span>
     <span class="doc-figure-label doc-figure-label--desktop terracotta" style="--x: 83.33%; --y: 43%;"><strong>R · Runtime</strong><br><code>daemon</code> · <code>spawn</code> · <code>maitre</code></span>
@@ -70,7 +70,7 @@ aoc add vigne my-api --path ~/my-api --repo mygroup/my-api [--auto-merge]
 
 ### `aoc add schedule <name>` / `aoc schedule`
 
-Add a cron-scheduled spawn (see [Scheduling](/docs/scheduling/)).
+Add a cron-scheduled spawn (see [Scheduling](docs/scheduling/)).
 
 ```bash
 aoc add schedule nightly --project my-api --cron "0 2 * * *" --prompt "…"
@@ -148,7 +148,7 @@ aoc attach my-session --steer     # writable steer mode (operator only)
 | `--steer` | Open in read-write mode — forwards local keystrokes to the agent's PTY |
 
 Press `Ctrl+C` to detach (sends a close signal so the responder tears down immediately).
-For a browser-based view, see `aoc webterm-link` and [Web Terminal](/docs/web-terminal/).
+For a browser-based view, see `aoc webterm-link` and [Web Terminal](docs/web-terminal/).
 
 ### `aoc maitre spawn|attach|list`
 
@@ -226,7 +226,7 @@ where tmux is unavailable.
 | `--pty-fd` | PTY master file descriptor (opened by the caller) |
 | `--vignoble-name` | Vignoble NATS namespace |
 
-See [Web Terminal](/docs/web-terminal/).
+See [Web Terminal](docs/web-terminal/).
 
 ## `aoc uncork`
 
@@ -259,12 +259,12 @@ The manifest is a JSON object:
 | `checksum` | — | none | Optional `sha256:<hex>` for integrity verification |
 
 The command fails fast on any non-2xx response, a `410 Gone` (revoked bundle), or malformed JSON.
-See [Remote Workers — Sandboxed bootstrap](/docs/remote-workers/#sandboxed-bootstrap) for the full workflow.
+See [Remote Workers — Sandboxed bootstrap](docs/remote-workers/#sandboxed-bootstrap) for the full workflow.
 
 ## `aoc` — capsules
 
 Buddy Capsules fund a vendangeur's LLM quota through Mnemosyne.
-See [Buddy Capsules](/docs/capsules/) for the full workflow.
+See [Buddy Capsules](docs/capsules/) for the full workflow.
 
 ### `aoc capsule-keygen`
 
@@ -358,7 +358,7 @@ aoc ontology inspect --group-id my-pipeline-build
 # Edge types:    DependsOn (3 pairs)  …
 ```
 
-See [The Ontology & Domain Extension](/docs/memory-ontology/) for how to write a
+See [The Ontology & Domain Extension](docs/memory-ontology/) for how to write a
 domain file and configure the domain loader (`PINARD_ONTOLOGY_DIRS`).
 
 ## `aoc` — admin & internals

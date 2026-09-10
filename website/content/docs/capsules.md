@@ -17,7 +17,7 @@ explains its pre-spawn gate, vendangeur runtime, reporting, and parking behavior
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="/images/docs/capsule-protocol-sequence-v2.png" alt="Six protocol actors above a six-step sequence: contract owner, funder, Mnemosyne, Pinard daemon, vendangeur, and LLM provider.">
+    <img src="images/docs/capsule-protocol-sequence-v2.png" alt="Six protocol actors above a six-step sequence: contract owner, funder, Mnemosyne, Pinard daemon, vendangeur, and LLM provider.">
     <span class="doc-figure-label charcoal" style="--x: 8.3%; --y: 28%;">Contract owner</span>
     <span class="doc-figure-label terracotta" style="--x: 25%; --y: 28%;">Funder</span>
     <span class="doc-figure-label mustard" style="--x: 41.7%; --y: 28%;">Mnemosyne</span>
@@ -418,6 +418,6 @@ restart a capsule run on the operator token.
 
 ## See also
 
-- **[The SWE Process](/docs/swe-process/)** — the overall issue → MR → merge loop.
-- **[Remote Workers](/docs/remote-workers/)** — sandboxed workers (HPC/Singularity) that also support capsules.
-- **[Web Terminal](/docs/web-terminal/)** — browser access to live vendangeur sessions.
+- **[The SWE Process](docs/swe-process/)** — the overall issue → MR → merge loop.
+- **[Remote Workers](docs/remote-workers/)** — sandboxed workers (HPC/Singularity) that also support capsules.
+- **[Web Terminal](docs/web-terminal/)** — browser access to live vendangeur sessions.

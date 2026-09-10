@@ -23,7 +23,7 @@ Three pillars hold it up:
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="/images/docs/docs-estate-overview.jpg" alt="A sketched vineyard estate with several independent worker parcels connected to a central control house and a persistent cellar archive.">
+    <img src="images/docs/docs-estate-overview.jpg" alt="A sketched vineyard estate with several independent worker parcels connected to a central control house and a persistent cellar archive.">
     <span class="doc-figure-label charcoal" style="--x: 50%; --y: 18%;">C · Central control</span>
     <span class="doc-figure-label doc-figure-label--desktop terracotta" style="--x: 22%; --y: 72%;">A · Agent parcels</span>
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 50%; --y: 78%;">M · Persistent memory</span>
@@ -44,6 +44,6 @@ smarter over time as it writes what it learns to memory.
 
 *One conductor. Many agents. One harvest.* 🍷
 
-New here? Start with the **[Overview](/docs/overview/)**, then
-**[The Semi-Deterministic Loop](/docs/semi-deterministic-loop/)** and
-**[Memory & Recall](/docs/memory/)** — the ideas that make the rest cohere.
+New here? Start with the **[Overview](docs/overview/)**, then
+**[The Semi-Deterministic Loop](docs/semi-deterministic-loop/)** and
+**[Memory & Recall](docs/memory/)** — the ideas that make the rest cohere.

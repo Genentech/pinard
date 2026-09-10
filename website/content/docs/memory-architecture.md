@@ -5,7 +5,7 @@ group: Memory
 ---
 
 > **Status legend:** ✅ shipped · 🔭 designed · 🧪 spike (being de-risked). The
-> engram capture-and-store surface described in [Memory & Recall](/docs/memory/) is
+> engram capture-and-store surface described in [Memory & Recall](docs/memory/) is
 > shipped today. The layered architecture on this page is the **design** Pinard is
 > building toward; treat 🔭 items as roadmap, not current behavior.
 
@@ -15,7 +15,7 @@ without breaking agents.
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="/images/docs/memory-layered-architecture.jpg" alt="A cellar cutaway with one rooftop scope landscape and exactly six interior floors: curation, ontology, knowledge graph, recall, one store-of-record floor, and capture.">
+    <img src="images/docs/memory-layered-architecture.jpg" alt="A cellar cutaway with one rooftop scope landscape and exactly six interior floors: curation, ontology, knowledge graph, recall, one store-of-record floor, and capture.">
     <span class="doc-figure-label mustard" style="--x: 50%; --y: 7%;">L6 · Scope & promotion</span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 10%; --y: 26%;">L5 · Curation & wiki</span>
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 10%; --y: 39%;">L4 · Ontology</span>
@@ -97,21 +97,21 @@ preferred long-term slot because it needs no store migration.
 Knowledge is typed by a **two-layer ontology**: a small, stable **Go-embedded core**
 (agent-operational concepts that mirror babysitter primitives) plus a **per-repo
 domain** layer that subclasses it via declarative YAML files — no Pinard rebuild
-required. See [The Ontology & Domain Extension](/docs/memory-ontology/).
+required. See [The Ontology & Domain Extension](docs/memory-ontology/).
 
 ## Layer 5 · Curation & wiki ✅
 
 A self-evolving **git-tracked OKF wiki ⇄ SurrealDB** turns the typed memory graph
 into curated, human-readable pages, with an **ontology gardener** that proposes
 structural extensions via human-reviewed MRs. See
-[Teaching & Curation](/docs/memory-curation/).
+[Teaching & Curation](docs/memory-curation/).
 
 ## Layer 6 · Scope & promotion ✅
 
 Knowledge is stored at the finest grain (a vigne) and **rolled up** — vigne →
 vignoble → global — with curate-on-promote ensuring only synthesized wiki_doc entries
 rise (never raw entities). Vignoble-shared results sync to `wiki/_shared/` for
-human visibility. See [Scope & Promotion](/docs/memory-curation/#scope--promotion).
+human visibility. See [Scope & Promotion](docs/memory-curation/#scope--promotion).
 
 ## Cross-cutting
 
@@ -120,7 +120,7 @@ human visibility. See [Scope & Promotion](/docs/memory-curation/#scope--promotio
   guaranteeing vector comparability, with no token/login dance.
 - **Portability** 🔭: the central store can be **subset** by scope into an embedded
   SurrealDB file — so a *pinard agent = harness + babysitter process + memory*, all
-  three versioned together. See [The Ontology](/docs/memory-ontology/#portable-memory-subsets).
+  three versioned together. See [The Ontology](docs/memory-ontology/#portable-memory-subsets).
 
 ## Status & de-risking
 
@@ -135,4 +135,4 @@ The remaining in-flight work is two 🧪 spikes: **(1)** Engram → SurrealDB cu
 ingestion and recall quality on 1024-d vectors (Layer 1 as the full store of record),
 and **(2)** SurrealDB → jsonl → Graphiti, to judge the temporal-KG value before
 committing (Layer 3). Until those land, the shipped engram path
-([Memory & Recall](/docs/memory/)) remains the primary agent-facing write path.
+([Memory & Recall](docs/memory/)) remains the primary agent-facing write path.

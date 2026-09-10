@@ -7,14 +7,14 @@ group: Memory
 > **Status:** The wiki curator, inbound sync, ontology gardener, confidence-gated
 > wiki serving, `/lesson`, `/teaching`, curate-on-promote, and MR knowledge ingestion
 > are all ✅ **shipped**. The shipped passive-capture write path is covered in
-> [Memory & Recall](/docs/memory/).
+> [Memory & Recall](docs/memory/).
 
 Capturing knowledge, turning it into something readable, and deciding what deserves
 to spread — that is the human-facing end of Pinard's memory.
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="/images/docs/memory-curation-loop.jpg" alt="Three explicit knowledge inputs—pinned lesson, teaching session, and passive observation—flow through typed entities, wiki curation, human review, and recall, with approved wiki knowledge promoted to broader scopes.">
+    <img src="images/docs/memory-curation-loop.jpg" alt="Three explicit knowledge inputs—pinned lesson, teaching session, and passive observation—flow through typed entities, wiki curation, human review, and recall, with approved wiki knowledge promoted to broader scopes.">
     <span class="doc-figure-label doc-figure-label--desktop terracotta" style="--x: 11%; --y: 34%;"><code>/lesson</code></span>
     <span class="doc-figure-label doc-figure-label--desktop terracotta" style="--x: 12%; --y: 65%;"><code>/teaching</code></span>
     <span class="doc-figure-label doc-figure-label--desktop terracotta" style="--x: 13%; --y: 90%;">Passive observation</span>
@@ -160,7 +160,7 @@ prefixing a review note with `@memory:` (case-insensitive):
 The daemon intercepts this marker immediately during review forwarding and routes
 the note body straight into the `/lesson` pipeline — no Pass 2 LLM call, no
 ambiguity. The same extraction runs in `aoc mr-memory` replay (see [CLI
-Reference](/docs/cli-reference/#aoc-mr-memory)).
+Reference](docs/cli-reference/#aoc-mr-memory)).
 
 #### Noise filter
 
@@ -245,7 +245,7 @@ Key behaviors:
   are isolated; a human edit to one vigne's page only affects that vigne's scope.
 - **LLM-synthesized titles and summaries** — the curator requests structured JSON
   `{title, summary, body}` from the LLM; the `summary` field is stored in SurrealDB
-  and used in boot manifests (see [Boot injection](/docs/memory/#boot-injection-at-spawn)).
+  and used in boot manifests (see [Boot injection](docs/memory/#boot-injection-at-spawn)).
 
 The curator writes pages as a branch + MR in the wiki git repo so all changes are
 human-reviewable before landing.
@@ -392,5 +392,5 @@ memory-ingester --rechunk     # rebuild per-heading wiki chunk embeddings
 
 ## Next
 
-- **[The Ontology & Portable Memory](/docs/memory-ontology/)** — how promoted types and rules are typed and shipped.
-- **[The Layered Memory Architecture](/docs/memory-architecture/)** — the full stack.
+- **[The Ontology & Portable Memory](docs/memory-ontology/)** — how promoted types and rules are typed and shipped.
+- **[The Layered Memory Architecture](docs/memory-architecture/)** — the full stack.

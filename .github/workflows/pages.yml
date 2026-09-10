@@ -32,7 +32,26 @@ jobs:
           extended: true
       - name: Build site
         working-directory: website
-        run: hugo --minify --baseURL "https://genentech.github.io/pinard/"
+        env:
+          PAGES_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          # Prefer the Pages-provided URL; fall back to deriving it from the repo
+          # context (owner.github.io/repo) if configure-pages returns empty
+          # — that empty case silently set baseURL=/ and broke every asset path.
+          base="$PAGES_URL"
+          if [ -z "$base" ]; then
+            owner="$(echo "${GITHUB_REPOSITORY%%/*}" | tr 'A-Z' 'a-z')"
+            repo="${GITHUB_REPOSITORY#*/}"
+            base="https://${owner}.github.io/${repo}"
+          fi
+          base="${base%/}/"                                  # normalize one trailing slash
+          site_path="$(printf '%s' "$base" | sed -E 's#^[a-z]+://[^/]+##')"  # e.g. /pinard/
+          echo "SITE_BASE_PATH=$site_path" >> "$GITHUB_ENV"
+          echo "Building with baseURL=$base"
+          hugo --minify --baseURL "$base"
+      - name: Check no root-absolute paths (would 404 under the Pages subpath)
+        working-directory: website
+        run: bash check-links.sh public "$SITE_BASE_PATH"
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
