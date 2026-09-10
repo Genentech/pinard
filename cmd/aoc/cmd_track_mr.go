@@ -178,37 +178,12 @@ var trackMRCmd = &cobra.Command{
 			return err
 		}
 
-		isNewTracking := false
-		mrState.Update(func(s *state.MRWatcherState) {
-			if s.Watched == nil {
-				s.Watched = make(map[string]*state.WatchedMR)
-			}
-			// Preserve existing tracking state if this MR is already tracked —
-			// re-tracking the same MR must NOT reset LastNoteID (that would
-			// re-dispatch every prior review comment, causing a feedback loop).
-			if existing, ok := s.Watched[sessionName]; ok && existing.MR == mr {
-				existing.Project = project
-				existing.Repo = repo
-				existing.LastChecked = time.Now().UTC().Format(time.RFC3339)
-				return
-			}
-			isNewTracking = true
-			s.Watched[sessionName] = &state.WatchedMR{
-				Name:        sessionName,
-				Project:     project,
-				Repo:        repo,
-				MR:          mr,
-				LastNoteID:  0,
-				LastChecked: time.Now().UTC().Format(time.RFC3339),
-			}
-		})
-
-		// Record the MR number on the worker's KV agent record so the watcher can
-		// resolve MR→worker UNAMBIGUOUSLY when multiple workers share one repo.
-		// The KV agent key equals the worker's AGENT_ID, which is the same value
-		// passed as --session here. We also capture whether a real KV record exists:
-		// synthetic session names (track-*, cuvee-*) have no entry, which means there
-		// is no live vendangeur tmux session to link to.
+		// Look up the KV agent record BEFORE writing the WatchedMR entry so we can
+		// persist parcelle+processName directly into the entry. This makes routing
+		// in dispatchToWorkerWithType reliable even when resolveAgentByToken later
+		// misses (e.g. the KV record key ≠ the session token for conductor-assigned
+		// vendangeurs). These fields are the primary routing source; the KV scan is
+		// only a fallback for entries written before this fix.
 		creds, credsErr := config.LoadCredentials()
 		hasKVRecord := false
 		// webtermTarget is the real tmux session name to use in the webterm link.
@@ -216,6 +191,9 @@ var trackMRCmd = &cobra.Command{
 		// KV record is found via a scan (issue-driven workers: KV key ≠ tmux name).
 		webtermTarget := sessionName
 		webtermVignoble := vb.Name
+		// entryParcelle / entryProcess hold the routing fields extracted from KV
+		// to be persisted in the WatchedMR entry.
+		var entryParcelle, entryProcess string
 		if credsErr == nil {
 			nc := pnats.NewClient(creds)
 			if err := nc.Connect(); err == nil {
@@ -227,6 +205,15 @@ var trackMRCmd = &cobra.Command{
 					}
 					if v, ok := rec["vignoble"].(string); ok && v != "" {
 						webtermVignoble = v
+					}
+					if p, ok := rec["parcelle"].(string); ok && p != "" {
+						entryParcelle = p
+					} else if p, ok := rec["project"].(string); ok && p != "" {
+						// Default parcelle is the project when not explicitly set.
+						entryParcelle = p
+					}
+					if proc, ok := rec["process"].(string); ok {
+						entryProcess = proc
 					}
 					rec["mr"] = mr
 					// Write back to the key that was found (direct or scanned).
@@ -242,6 +229,40 @@ var trackMRCmd = &cobra.Command{
 				nc.Close()
 			}
 		}
+
+		isNewTracking := false
+		mrState.Update(func(s *state.MRWatcherState) {
+			if s.Watched == nil {
+				s.Watched = make(map[string]*state.WatchedMR)
+			}
+			// Preserve existing tracking state if this MR is already tracked —
+			// re-tracking the same MR must NOT reset LastNoteID (that would
+			// re-dispatch every prior review comment, causing a feedback loop).
+			if existing, ok := s.Watched[sessionName]; ok && existing.MR == mr {
+				existing.Project = project
+				existing.Repo = repo
+				// Refresh routing fields if we now have better data from KV.
+				if entryParcelle != "" {
+					existing.Parcelle = entryParcelle
+				}
+				if entryProcess != "" {
+					existing.ProcessName = entryProcess
+				}
+				existing.LastChecked = time.Now().UTC().Format(time.RFC3339)
+				return
+			}
+			isNewTracking = true
+			s.Watched[sessionName] = &state.WatchedMR{
+				Name:        sessionName,
+				Project:     project,
+				Repo:        repo,
+				Parcelle:    entryParcelle,
+				ProcessName: entryProcess,
+				MR:          mr,
+				LastNoteID:  0,
+				LastChecked: time.Now().UTC().Format(time.RFC3339),
+			}
+		})
 
 		// Post a read-only terminal link on the MR (once) so a reviewer can watch
 		// this vendangeur in a browser. Gated on webterm.post_links and a real KV

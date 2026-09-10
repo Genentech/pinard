@@ -534,3 +534,182 @@ func TestDispatchRouting_ProcessWorkerAlwaysDispatched(t *testing.T) {
 		t.Error("process worker should have non-empty process name")
 	}
 }
+
+// ── Regression tests for issue #257: KV-miss dispatch ────────────────────────
+//
+// When a conductor-assigned vendangeur tracks an MR, its pinard-agents KV record
+// may be keyed by agentId (e.g. "pinard-swe-257") but the watcher stores the
+// entry under the tmux session name (e.g. "pinard--pinard-257791679").
+// resolveAgentByToken therefore misses on a direct lookup AND a name-scan if the
+// session token doesn't appear in any KV field. The fix: persist parcelle +
+// processName in the WatchedMR entry at track_mr time and use those as the
+// primary routing source in dispatchToWorkerWithType.
+//
+// These tests assert that pipeline_failed / review_comment still reach the real
+// …parcelles.<parcelle>.agents.<agentId>.process.<process>.inbox even when
+// resolveAgentByToken returns nil for the session token.
+
+// TestDispatch_EntryFieldsUsedWhenKVMisses is the core regression:
+// the WatchedMR entry carries Parcelle + ProcessName but the KV bucket has NO
+// record matching the session token (simulates conductor-assigned vendangeur
+// scenario where the KV key != session name and name-scan also misses).
+func TestDispatch_EntryFieldsUsedWhenKVMisses(t *testing.T) {
+	dir := t.TempDir()
+	mrState, _ := state.Load[state.MRWatcherState](filepath.Join(dir, "mr-watcher.yaml"))
+
+	// Tracked entry uses tmux session name as key; parcelle+processName are
+	// persisted from the KV record at track_mr time.
+	sessionToken := "pinard--pinard-257791679"
+	mrState.Update(func(s *state.MRWatcherState) {
+		s.Watched = map[string]*state.WatchedMR{
+			sessionToken: {
+				Name:        sessionToken,
+				Project:     "pinard",
+				Repo:        "example-group/example-repo",
+				Parcelle:    "pinard",
+				ProcessName: "swe",
+				MR:          257,
+			},
+		}
+	})
+
+	// KV has a record, but it is keyed by agentId and none of its fields match
+	// the session token — resolveAgentByToken will miss.
+	kv := newMockKV()
+	kv.setAgent("pinard-swe-257", map[string]any{
+		"project":  "pinard",
+		"process":  "swe",
+		"parcelle": "pinard",
+		"agentId":  "pinard-swe-257",
+		"name":     "DIFFERENT-NAME", // does not match session token
+		"mr":       float64(257),
+	})
+
+	w := &MRWatcher{
+		KV:       kv,
+		State:    mrState,
+		Vignoble: &config.Vignoble{Name: "misc"},
+	}
+
+	// resolveAgentByToken must miss for this session token.
+	kvKey, rec := w.resolveAgentByToken(sessionToken)
+	if rec != nil {
+		t.Fatalf("resolveAgentByToken should miss for %q (got kvKey=%q)", sessionToken, kvKey)
+	}
+
+	// resolveEntryRouting must return the entry-stored fields.
+	parcelle, processName := w.resolveEntryRouting(sessionToken)
+	if parcelle != "pinard" {
+		t.Errorf("resolveEntryRouting: parcelle = %q, want %q", parcelle, "pinard")
+	}
+	if processName != "swe" {
+		t.Errorf("resolveEntryRouting: processName = %q, want %q", processName, "swe")
+	}
+
+	// getWorkerParcelle must NOT return the session string.
+	gotParcelle := w.getWorkerParcelle(sessionToken)
+	if gotParcelle == sessionToken {
+		t.Errorf("getWorkerParcelle must NOT return the session string as parcelle, got %q", gotParcelle)
+	}
+	if gotParcelle != "pinard" {
+		t.Errorf("getWorkerParcelle = %q, want %q", gotParcelle, "pinard")
+	}
+
+	// The inbox subject built from entry fields must be correct.
+	subject := WorkerInboxSubject(w.Vignoble.Name, parcelle, sessionToken, processName)
+	expected := "pinard.misc.parcelles.pinard.agents.pinard--pinard-257791679.process.swe.inbox"
+	if subject != expected {
+		t.Errorf("inbox subject = %q, want %q", subject, expected)
+	}
+}
+
+// TestDispatch_EntryParcelleFallsBackToKVWhenEmpty tests that when the WatchedMR
+// entry has empty Parcelle/ProcessName (old entry, written before this fix),
+// dispatchToWorkerWithType still routes correctly via the KV fallback path.
+func TestDispatch_EntryParcelleFallsBackToKVWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	mrState, _ := state.Load[state.MRWatcherState](filepath.Join(dir, "mr-watcher.yaml"))
+
+	// Old-style entry: no Parcelle / ProcessName fields.
+	mrState.Update(func(s *state.MRWatcherState) {
+		s.Watched = map[string]*state.WatchedMR{
+			"pinard-swe-257": {
+				Name:    "pinard-swe-257",
+				Project: "pinard",
+				Repo:    "example-group/example-repo",
+				MR:      257,
+				// Parcelle and ProcessName intentionally empty.
+			},
+		}
+	})
+
+	// KV keyed directly by the session token (direct hit).
+	kv := newMockKV()
+	kv.setAgent("pinard-swe-257", map[string]any{
+		"project":  "pinard",
+		"process":  "swe",
+		"parcelle": "pinard",
+		"agentId":  "pinard-swe-257",
+		"mr":       float64(257),
+	})
+
+	w := &MRWatcher{
+		KV:       kv,
+		State:    mrState,
+		Vignoble: &config.Vignoble{Name: "misc"},
+	}
+
+	// Entry fields are empty — resolveEntryRouting returns ("", "").
+	parcelle, processName := w.resolveEntryRouting("pinard-swe-257")
+	if parcelle != "" || processName != "" {
+		t.Errorf("resolveEntryRouting on old entry: expected (\"\",\"\"), got (%q, %q)", parcelle, processName)
+	}
+
+	// KV fallback: getWorkerParcelle must still resolve correctly.
+	gotParcelle := w.getWorkerParcelle("pinard-swe-257")
+	if gotParcelle != "pinard" {
+		t.Errorf("getWorkerParcelle (KV fallback) = %q, want %q", gotParcelle, "pinard")
+	}
+
+	// Subject built via KV fallback must be correct.
+	kvKey, kvData := w.resolveAgentByToken("pinard-swe-257")
+	if kvData == nil {
+		t.Fatal("resolveAgentByToken should find the KV record")
+	}
+	proc, _ := kvData["process"].(string)
+	par, _ := kvData["parcelle"].(string)
+	subject := WorkerInboxSubject(w.Vignoble.Name, par, kvKey, proc)
+	expected := "pinard.misc.parcelles.pinard.agents.pinard-swe-257.process.swe.inbox"
+	if subject != expected {
+		t.Errorf("inbox subject = %q, want %q", subject, expected)
+	}
+}
+
+// TestGetWorkerParcelle_NeverReturnsSessionString ensures the old fallback bug
+// (returning the session string as the parcelle) is gone.
+func TestGetWorkerParcelle_NeverReturnsSessionString(t *testing.T) {
+	dir := t.TempDir()
+	mrState, _ := state.Load[state.MRWatcherState](filepath.Join(dir, "mr-watcher.yaml"))
+	// No entry in state, no KV record — both lookups miss.
+	mrState.Update(func(s *state.MRWatcherState) {
+		s.Watched = map[string]*state.WatchedMR{}
+	})
+
+	kv := newMockKV() // empty
+
+	w := &MRWatcher{
+		KV:       kv,
+		State:    mrState,
+		Vignoble: &config.Vignoble{Name: "misc"},
+	}
+
+	sessionToken := "pinard--pinard-257791679"
+	got := w.getWorkerParcelle(sessionToken)
+	if got == sessionToken {
+		t.Errorf("getWorkerParcelle must NOT return the session string %q as parcelle", sessionToken)
+	}
+	// Should return "" when nothing can be resolved.
+	if got != "" {
+		t.Errorf("getWorkerParcelle with no entry and no KV should return \"\", got %q", got)
+	}
+}

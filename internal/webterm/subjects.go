@@ -103,12 +103,3 @@ const (
 	ModeRW   = "rw"
 	ModeList = "list" // control-room enumeration grant
 )
-
-// PtyOutSubject is the stable per-agent subject on which a local PTY pump
-// publishes raw terminal output. It does not require a grant — NATS auth is
-// the trust boundary for this read-only channel.
-//
-// Format: pinard.<vignoble>.agents.<agentID>.pty.out
-func PtyOutSubject(vignoble, agentID string) string {
-	return fmt.Sprintf("pinard.%s.agents.%s.pty.out", vignoble, agentID)
-}

@@ -279,7 +279,16 @@ func (w *MRWatcher) sessionIsAlive(name string) bool {
 
 func (w *MRWatcher) stopSession(name string) {
 	if w.Session != nil {
-		w.Session.StopWorker(w.Vignoble.Name, name)
+		// The Watched map key is the KV agentID (= runId for process workers).
+		// The actual tmux session name lives in rec["name"]. Use it when present
+		// so we kill the right session even when the map key ≠ session name.
+		tmuxTarget := name
+		if rec, err := w.KV.Get("pinard-agents", name); err == nil && rec != nil {
+			if n, _ := rec["name"].(string); n != "" {
+				tmuxTarget = n
+			}
+		}
+		w.Session.StopWorker(w.Vignoble.Name, tmuxTarget)
 	}
 	w.KV.Del("pinard-agents", name)
 }
@@ -297,8 +306,25 @@ func (w *MRWatcher) reapWorker(name string) {
 	log.Printf("[mr-watcher] Reaped %s (work complete)", name)
 }
 
+// resolveEntryRouting returns the (parcelle, processName) fields from the
+// tracked WatchedMR entry for the given session key. These are the primary
+// routing source — written at track_mr time from the live KV record — and
+// do not require a KV round-trip at dispatch time.
+func (w *MRWatcher) resolveEntryRouting(session string) (parcelle, processName string) {
+	if w.State == nil {
+		return
+	}
+	w.State.Read(func(s *state.MRWatcherState) {
+		if entry, ok := s.Watched[session]; ok {
+			parcelle = entry.Parcelle
+			processName = entry.ProcessName
+		}
+	})
+	return
+}
+
 func (w *MRWatcher) publishEvent(session, eventType string, data map[string]any) {
-	parcelle := w.getWorkerParcelle(session)
+	parcelle := w.resolveWorkerParcelle(session)
 	subject := pnats.AgentEventsSubject(w.Vignoble.Name, parcelle, session, "", eventType)
 	if err := w.NATS.Publish(subject, data); err != nil {
 		log.Printf("[mr-watcher] NATS publish FAILED for %s: %v", subject, err)
@@ -341,41 +367,84 @@ func WorkerInboxSubject(vignoble, parcelle, session, processName string) string 
 }
 
 func (w *MRWatcher) dispatchToWorkerWithType(session, eventType, message string, data map[string]any) {
-	processName := w.getWorkerProcess(session)
+	// Primary: use parcelle + processName persisted in the WatchedMR entry at
+	// track_mr time. This is reliable even when resolveAgentByToken misses
+	// (e.g. conductor-assigned vendangeurs whose KV record key ≠ session token).
+	entryParcelle, processName := w.resolveEntryRouting(session)
 	dispatchTarget := session
 
-	// If no process found for this key, the tracked entry uses a different key than
-	// the worker's KV agent ID (e.g. an auto-tracked placeholder, or a session
-	// entry that was stored with an empty/wrong project name before fix #63).
-	// Resolve the real owning agent from KV, matching the EXACT MR so a comment is
-	// never routed to a different worker that happens to share the repo.
+	// Secondary: if the entry fields are absent (entry written before this fix,
+	// or a synthetic track-* placeholder), fall back to the KV scan. This also
+	// resolves the agentId (the real KV key) for the dispatch target so the
+	// subject carries the correct agentID, not the session name.
+	if processName == "" {
+		kvKey, kvData := w.resolveAgentByToken(session)
+		if kvData != nil {
+			if p, _ := kvData["process"].(string); p != "" {
+				processName = p
+				if kvKey != "" {
+					dispatchTarget = kvKey
+				}
+				if entryParcelle == "" {
+					if par, _ := kvData["parcelle"].(string); par != "" {
+						entryParcelle = par
+					} else if proj, _ := kvData["project"].(string); proj != "" {
+						entryParcelle = proj
+					}
+				}
+			}
+		}
+	}
+
+	// Tertiary: if still no process, this may be a track-* placeholder or an
+	// auto-tracked entry whose session key doesn't match any KV record. Try to
+	// find the real worker by exact (project, MR) match, then by MR IID.
 	if processName == "" {
 		project, _ := data["project"].(string)
 		mrIID := dataInt(data["mr"])
 		if mrIID > 0 {
 			var agentID string
 			if project != "" {
-				// Primary: exact (project, MR) match
 				agentID = w.findAgentForMR(project, mrIID)
 			}
 			if agentID == "" {
-				// Fallback: scan by MR IID — handles entries written with a wrong/
-				// empty project (e.g. before this fix) or placeholder sessions.
-				// Pass repo for tiebreaking across repos that share an MR IID.
 				repo, _ := data["repo"].(string)
 				agentID = w.findAgentForMRByIDAndRepo(mrIID, repo)
 			}
 			if agentID != "" {
-				altProcess := w.getWorkerProcess(agentID)
-				if altProcess != "" {
-					processName = altProcess
-					dispatchTarget = agentID
+				_, kvData := w.resolveAgentByToken(agentID)
+				if kvData != nil {
+					if p, _ := kvData["process"].(string); p != "" {
+						processName = p
+						dispatchTarget = agentID
+						if entryParcelle == "" {
+							if par, _ := kvData["parcelle"].(string); par != "" {
+								entryParcelle = par
+							} else if proj, _ := kvData["project"].(string); proj != "" {
+								entryParcelle = proj
+							}
+						}
+					}
 				}
 			}
 		}
 	}
 
-	parcelle := w.getWorkerParcelle(dispatchTarget)
+	// Build parcelle: entry fields beat KV beats project-from-data. Never fall
+	// back to the session string — that produces a garbage subject segment.
+	parcelle := entryParcelle
+	if parcelle == "" {
+		if proj, _ := data["project"].(string); proj != "" {
+			parcelle = proj
+		}
+	}
+	if parcelle == "" {
+		// Cannot determine a valid parcelle — log and skip rather than
+		// publishing to a garbage subject.
+		log.Printf("[mr-watcher] dispatchToWorkerWithType: cannot resolve parcelle for session %q (eventType=%s) — skipping dispatch", session, eventType)
+		return
+	}
+
 	subject := WorkerInboxSubject(w.Vignoble.Name, parcelle, dispatchTarget, processName)
 
 	payload := map[string]any{
@@ -599,10 +668,15 @@ func (w *MRWatcher) getWorkerProcess(session string) string {
 }
 
 // getWorkerParcelle resolves the parcelle for a worker's KV agent key, used to
-// build parcelle-scoped subjects. Falls back to the worker's project (the
-// default-bucket parcelle), then to the session id so the subject is always
-// well-formed even if KV is missing/incomplete.
+// build parcelle-scoped subjects. Checks the WatchedMR entry first (written at
+// track_mr time), then falls back to the KV record. Never returns the session
+// string as a parcelle — that produces a garbage subject segment.
 func (w *MRWatcher) getWorkerParcelle(session string) string {
+	// Primary: entry-stored parcelle (reliable, no KV round-trip needed).
+	if ep, _ := w.resolveEntryRouting(session); ep != "" {
+		return ep
+	}
+	// Secondary: KV record.
 	_, data := w.resolveAgentByToken(session)
 	if data != nil {
 		if p, _ := data["parcelle"].(string); p != "" {
@@ -612,6 +686,22 @@ func (w *MRWatcher) getWorkerParcelle(session string) string {
 			return proj
 		}
 	}
+	// Do NOT fall back to the session string — that produces a garbage parcelle
+	// segment in the NATS subject (the root cause of issue #257).
+	return ""
+}
+
+// resolveWorkerParcelle is like getWorkerParcelle but is used in publishEvent
+// (events, not inbox dispatch). It can fall back to the session string as a
+// best-effort because events are informational (conductor visibility), not
+// delivery-critical like inbox dispatch. Freeform workers without a persisted
+// parcelle are unaffected — they have no process and no inbox subject.
+func (w *MRWatcher) resolveWorkerParcelle(session string) string {
+	if p := w.getWorkerParcelle(session); p != "" {
+		return p
+	}
+	// For events (not dispatch), fall back to session as a last resort so the
+	// event subject is at least non-empty and the conductor can see it.
 	return session
 }
 

@@ -4,9 +4,7 @@ weight: 32
 group: Memory
 ---
 
-> **Status:** 🔭 designed. This page describes the memory layer Pinard is building
-> toward (the `memory-layer` change). The shipped memory system is
-> [Memory & Recall](/docs/memory/).
+> **Status:** ✅ shipped (core ontology + domain extension + CLI). The Go ontology registry replaced the Python `pinard-core` package. The broader multi-model store design is 🔭 designed — see [The Layered Memory Architecture](/docs/memory-architecture/).
 
 For a fleet's knowledge to be *queryable* and *portable*, it has to be **typed**.
 Pinard types memory with a **layered ontology** and ships it as **versioned,
@@ -36,14 +34,15 @@ A single flat ontology forces a false choice: either it is generic and useless, 
 it bakes one domain's specifics (say, GWAS/HPC terms) into what should be shared by
 everyone. Pinard splits it into two layers instead.
 
-### Layer 1 — `pinard-core`
+### Layer 1 — core ontology
 
 Repo-agnostic, agent-operational concepts that mirror the primitives of a
-[semi-deterministic loop](/docs/semi-deterministic-loop/). Small and stable,
-versioned centrally in Pinard:
+[semi-deterministic loop](/docs/semi-deterministic-loop/). Encoded as declarative
+YAML embedded in the Pinard binary (`internal/ontology/core.yaml`) — no Python or
+external runtime required. Small and stable, versioned centrally in Pinard:
 
-- **Entities:** `Task` / `Step`, `Verdict` / `Decision`, `Gate` (a breakpoint),
-  `Action`, `Diagnosis`, `LogPattern`, `EnvironmentCondition`, `Artifact`.
+- **Entities:** `task` / `step`, `verdict` / `decision`, `gate` (a breakpoint),
+  `action`, `diagnosis`, `log_pattern`, `environment_condition`, `artifact`.
 - **Edges:** `DependsOn`, `Produces`, `Consumes`, `IndicatesProblem`, `ResolvedBy`,
   `RequiresCondition`, `TriggersDecision`.
 
@@ -60,6 +59,93 @@ its `process.js`. For example, a GWAS pipeline repo might define:
 Granularity is **per-repo by default** (a per-process override only where a process
 genuinely diverges; per-agent is too granular). A `data-pipeline` mid-layer between
 core and domain is **deferred but intended**.
+
+## Writing a domain ontology file ✅
+
+A domain ontology is a YAML file conforming to the Pinard meta-schema. Drop it in
+your vigne's `pinard/ontology/` directory (see [Domain extension loading](#domain-extension-loading)
+below) and the ingester picks it up automatically — no Pinard rebuild required.
+
+```yaml
+domain: my-pipeline
+version: "1.0.0"
+group_ids:
+  - my-pipeline-build
+
+entities:
+  pipeline_job:
+    description: "A batch job submitted by the pipeline."
+    is_a: task           # inherits task properties from core
+    properties:
+      job_id:
+        type: integer
+        description: "Job ID assigned at submission."
+      partition:
+        type: string
+        description: "Compute partition the job ran on."
+
+edges:
+  SubmittedTo:
+    pairs:
+      - [pipeline_job, environment_condition]
+```
+
+**File envelope fields:**
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `domain` | ✓ | Short identifier for your domain |
+| `version` | ✓ | Semver `X.Y.Z` |
+| `entities` | ✓ | Map of role-name → entity definition |
+| `edges` | ✓ | Map of edge-name → `{pairs: [[src, tgt], …]}` |
+| `group_ids` | — | Which group IDs this domain applies to (empty = applies to all) |
+| `suppressed` | — | List of core entity/edge names to remove from this composition |
+
+Each entity entry:
+- `description` — required
+- `is_a` — core role to inherit properties from
+- `properties` — map of property-name → JSON Schema fragment (`type`, `description`, `format`, `minimum`, `maximum`, `enum`, `items`)
+- `required` — list of required property names
+
+### Domain extension loading
+
+The ingester discovers domain files at startup from:
+
+1. **`PINARD_ONTOLOGY_DIRS`** — colon-separated list of directories scanned for
+   `*.yaml` / `*.yml` / `*.json` files (for k8s / CI use).
+2. **`<vignoble>/pinard/ontology/*.{yaml,yml,json}`** — auto-discovered when
+   `VIGNOBLE_DIR` is set (the default in a local vignoble).
+
+Missing directories are non-fatal (logged warning). Invalid files are skipped with a
+warning; valid siblings still load.
+
+### Composition semantics
+
+`Compose(group_id)` = **core + domain(group_id) − suppressed**:
+
+- **`is_a` inheritance** — a domain entity with `is_a: task` merges task's core properties
+  under its own (domain properties win on key collision).
+- **Edge extension** — domain edges sharing a name with a core edge *append* their pairs
+  rather than replacing the core pairs.
+- **Suppressed** — role or edge names in `suppressed` are excluded from the result.
+
+## CLI tools ✅
+
+Two new `aoc` subcommands help domain authors validate and inspect their ontology:
+
+```bash
+# Validate a domain file — exit 0 on success, non-zero on error
+aoc ontology validate path/to/my-pipeline.yaml
+# ✓ my-pipeline.yaml is valid
+
+# Inspect the composed result for a group_id
+aoc ontology inspect --group-id my-pipeline-build
+# Composed ontology for group_id="my-pipeline-build" (core 1.0.0 + domain my-pipeline@1.0.0):
+# Entity roles:  task  step  verdict  decision  gate  action …  pipeline_job  …
+# Edge types:    DependsOn (3 pairs)  …  SubmittedTo (1 pairs)
+```
+
+Use `aoc ontology validate` as a CI gate in domain repos to catch schema errors early.
 
 ## Lifecycle: prescribed → learned → promoted
 

@@ -50,7 +50,15 @@ Scaffold a vignoble and start its daemon.
 
 ```bash
 aoc init myproject --gitlab-host gitlab.com --gitlab-group mygroup [--path ~/vignoble-myproject]
+aoc init myproject --local        # solo mode: localhost endpoints, no --gitlab-host required
 ```
+
+| Flag | Purpose |
+|------|---------|
+| `--gitlab-host` | GitLab hostname (required for normal mode; optional with `--local`) |
+| `--gitlab-group` | GitLab group path |
+| `--path` | Target directory (defaults to `~/vignoble-<name>`) |
+| `--local` | Solo mode: write `~/.config/pinard/credentials.yaml` with localhost endpoints; does not start the daemon automatically (run `aoc daemon start` after services are up) |
 
 ### `aoc add vigne <name>`
 
@@ -121,25 +129,25 @@ aoc spawn --project my-api --issue 42 --parcelle semantic-search
 
 ### `aoc attach <session>`
 
-Stream a vendangeur's terminal output over NATS to your **local terminal** — read-only,
-no browser or web gateway required. Resolves the session from the `pinard-agents` KV by
-name, agentId, or runId.
+Stream a vendangeur's terminal output over NATS to your **local terminal**. Resolves
+the session from the `pinard-agents` KV by name, agentId, or runId. Uses the same
+grant-gated responder protocol as the web gateway — requires `webterm.grant_secret`
+in `credentials.yaml`.
 
 ```bash
-aoc attach my-session             # stream by session name
-aoc attach abc123def              # stream by agentId or runId
-aoc attach my-session --timeout 5m  # detach after 5 minutes idle
+aoc attach my-session             # read-only view
+aoc attach abc123def              # resolve by agentId or runId
+aoc attach my-session --timeout 5m  # detach after 5 min idle
+aoc attach my-session --steer     # writable steer mode (operator only)
 ```
 
 | Flag | Purpose |
 |------|--------|
 | `--vignoble-name` | Vignoble NATS namespace; defaults to `NATS_VIGNOBLE` |
 | `--timeout` | Detach after this much idle time (0 = no timeout, the default) |
+| `--steer` | Open in read-write mode — forwards local keystrokes to the agent's PTY |
 
-For sessions on the **local tmux host**, `aoc attach` also starts an in-process PTY
-pump so output is available over NATS without a separate `aoc webterm-responder`
-process. Press `Ctrl+C` to detach.
-
+Press `Ctrl+C` to detach (sends a close signal so the responder tears down immediately).
 For a browser-based view, see `aoc webterm-link` and [Web Terminal](/docs/web-terminal/).
 
 ### `aoc maitre spawn|attach|list`
@@ -166,6 +174,25 @@ aoc track-mr --session <s> --mr <n> --project <p>   # register an MR with the wa
 aoc untrack-mr --session <s>                          # stop watching
 ```
 
+### `aoc mr-memory` {#aoc-mr-memory}
+
+Fetch a merged MR from GitLab and publish a memory event — identical to what the
+live mr-watcher emits on merge. Useful for backfilling knowledge from MRs that
+merged before memory ingestion was configured, or for replaying an MR that was
+skipped by the noise filter.
+
+```bash
+aoc mr-memory --repo group/project --mr <iid>
+aoc mr-memory --repo group/project --mr <iid> --dry-run    # inspect payload, no publish
+aoc mr-memory --repo group/project --mr <iid> --force      # bypass noise filter
+aoc mr-memory --repo group/project --mr <iid> --project <name>  # explicit project name
+```
+
+The command runs both the description+issues pass (Pass 1) and the review delta pass
+(Pass 2), and also extracts any `@memory:` markers from the review notes. By default
+the project name is resolved from `vignes.yaml`; if no match is found it falls back
+to the repository basename.
+
 ## `aoc` — status & schedules
 
 ```bash
@@ -180,12 +207,24 @@ aoc unschedule --name <name>
 ```bash
 aoc webterm-link --target <session>            # print a read-only browser link
 aoc webterm-link --target <session> --auto     # same, but print nothing (exit 0) when webterm/post_links is off
-aoc webterm-responder                          # run the host responder (standalone/HPC hosts)
+aoc webterm-responder                          # run the tmux-backed host responder
+aoc webterm-worker-responder                   # daemon-less PTY responder (HPC / no-tmux path)
 ```
 
 The link is **unsigned** when Cognito SSO is enabled (gateway grants only SSO'd operators)
 or **signed + expiring** otherwise. `--auto` is intended for automated callers that want
 to append a link only when one exists.
+
+`aoc webterm-worker-responder` bridges the caller's own PTY (passed via `--pty-fd`)
+directly over NATS using the same grant-gated protocol — no tmux required. It is
+launched automatically by `bin/pinard --worker` on daemon-less or Singularity hosts
+where tmux is unavailable.
+
+| Flag (`webterm-worker-responder`) | Purpose |
+|-----------------------------------|---------|
+| `--session-name` | Session name this responder answers for |
+| `--pty-fd` | PTY master file descriptor (opened by the caller) |
+| `--vignoble-name` | Vignoble NATS namespace |
 
 See [Web Terminal](/docs/web-terminal/).
 
@@ -273,6 +312,54 @@ aoc capsule-redeem <contract_id>
 
 Render `<rundir>/capsule-report.md` to HTML and PATCH the contract's result URL.
 Called by the babysitter at the end of a funded run.
+
+## `aoc` — memory & ontology
+
+### `aoc memory-status`
+
+Show unified memory health: Engram replication, SurrealDB ingestion, and wiki curation
+in three tabbed sections, followed by a one-line verdict.
+
+```bash
+aoc memory-status                            # auto-detect vignoble from cwd or NATS_VIGNOBLE
+aoc memory-status --vignoble myproject       # explicit vignoble
+aoc memory-status --json                     # raw JSON output
+aoc memory-status --timeout 5000            # request timeout in milliseconds (default 10000)
+```
+
+| Section | What it reports |
+|---------|----------------|
+| **Engram** | Reachable (true/false) + pending cloud-sync count |
+| **SurrealDB** | Per-group ingest lag, failed-write count, last ingest time |
+| **Wiki** | Per-group doc count, auto-serve count, curator cursor |
+
+The command exits non-zero when any group has lag > 0, failed writes > 0, or the
+ingester is unreachable. Suitable as a health check in scripts and CI.
+
+### `aoc ontology validate`
+
+Validate a domain ontology YAML file against the Pinard meta-schema. Exits 0 on
+success, non-zero on failure — suitable as a CI gate in domain repos.
+
+```bash
+aoc ontology validate path/to/my-pipeline.yaml
+# ✓ my-pipeline.yaml is valid
+```
+
+### `aoc ontology inspect`
+
+Print the composed ontology for a given `group_id` — shows entity roles, edge types,
+and the core/domain version stamp.
+
+```bash
+aoc ontology inspect --group-id my-pipeline-build
+# Composed ontology for group_id="my-pipeline-build" (core 1.0.0 + domain my-pipeline@1.0.0):
+# Entity roles:  task  step  verdict  decision  gate  …  pipeline_job  …
+# Edge types:    DependsOn (3 pairs)  …
+```
+
+See [The Ontology & Domain Extension](/docs/memory-ontology/) for how to write a
+domain file and configure the domain loader (`PINARD_ONTOLOGY_DIRS`).
 
 ## `aoc` — admin & internals
 

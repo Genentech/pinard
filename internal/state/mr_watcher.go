@@ -4,6 +4,8 @@ type WatchedMR struct {
 	Name              string `yaml:"name"`
 	Project           string `yaml:"project"`
 	Repo              string `yaml:"repo"`
+	Parcelle          string `yaml:"parcelle,omitempty"`
+	ProcessName       string `yaml:"process_name,omitempty"`
 	MR                int    `yaml:"mr,omitempty"`
 	LastNoteID        int    `yaml:"last_note_id"`
 	LastPipelineID    int    `yaml:"last_pipeline_id,omitempty"`

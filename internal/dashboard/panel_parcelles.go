@@ -493,10 +493,8 @@ func buildParcelleInfo(name, parcelleDir string) ParcelleInfo {
 
 	// Read status from parcelle.yaml
 	yamlPath := filepath.Join(parcelleDir, "parcelle.yaml")
-	if data, err := os.ReadFile(yamlPath); err == nil {
-		if strings.Contains(string(data), "status: archived") {
-			info.Status = "archived"
-		}
+	if cfg, err := config.LoadParcelleConfig(yamlPath); err == nil {
+		info.Status = cfg.Status
 	}
 
 	runsDir := filepath.Join(parcelleDir, "runs")

@@ -99,6 +99,16 @@ let engramKVWatchInterval: ReturnType<typeof setInterval> | null = null;
 let engramLastToolAt = 0;
 let engramClearTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Unified memory status — aggregated from the memory-ingester NATS handler.
+// When memStatusAvailable=true, refreshStatusLine uses these instead of the
+// engram-only reachability/KV state.
+let memStatusAvailable = false;
+let memStatusLag = 0;
+let memStatusFailed = 0;
+let memStatusWikiStale = false;
+let memStatusPending = 0;
+let memStatusInterval: ReturnType<typeof setInterval> | null = null;
+
 // ── Teaching Mode ────────────────────────────────────────────
 // Pure helpers (parseDuration, parseTeachingArgs, buildEpisodePayload, TurnRecord)
 // are imported from lib/teaching.ts — no Pi SDK dependency there.
@@ -183,6 +193,71 @@ slog("extension module evaluated (= pi boot + extension load)");
 // pinard-authored notes; one carrying this marker is forwarded to the worker
 // anyway. Keep in sync with conductorMarker in internal/watcher/mrs.go.
 const CONDUCTOR_MARKER = "<!-- pinard:conductor -->";
+
+// ── Régisseur relay guidance (régisseur role only — never maître or vendangeur) ─
+// Injected via before_agent_start gated on !IS_MAITRE. Do NOT add to PINARD.md
+// (which is shared and would leak into maître prompts).
+// NOTE: send_message only resolves vendangeurs (via kvAgents). Maître relay MUST
+// use `aoc notify --parcelle <p>` which publishes to the parcelle notifications
+// subject that each maître subscribes to.
+const REGISSEUR_RELAY_GUIDANCE = `
+
+---
+## Régisseur — relaying operator messages to maître(s)
+
+When the operator's conversation concerns one or more workstreams (parcelles) — even
+several interlinked ones — follow this protocol:
+
+1. **Recognize** that the discussion is relevant to a specific parcelle (or several).
+   Use \`get_maitre_status\` to identify which parcelles are active and to disambiguate
+   when the topic could match multiple workstreams. To get a fresh, LLM-authored report
+   from a specific maître, use \`get_maitre_status(parcelle="<name>")\` — this triggers
+   the maître's LLM to call \`report_to_regisseur\` and waits up to 35s for the result.
+   Add \`context="..."\` to focus the report (e.g. \`context="regarding CI stability"\`).
+   Without a parcelle arg, you get the cached cross-parcelle board.
+
+2. **Offer** — do NOT auto-relay. At an appropriate moment, say something like:
+   > "Want me to bring the \`<parcelle>\` maître up to speed on this?"
+   For multiple parcelles:
+   > "Want me to update the \`memory\` and \`webterm\` maîtres on this? I'd send each a tailored message."
+
+3. **Wait for confirmation.** List the parcelles you would inform and let the operator
+   drop or add targets before you relay. Never relay without explicit confirmation.
+
+4. **Relay** — once confirmed, send a tailored, concise message to each target maître:
+   \`\`\`
+   aoc notify --parcelle <parcelle> "<concise message tailored to that maître>"
+   \`\`\`
+   Run one \`aoc notify --parcelle\` call per target. Shape each message to what THAT
+   maître needs to know — reference issues/MRs where relevant. Do not broadcast a
+   single generic message to all targets.
+
+   ⚠️  Do NOT use \`send_message\` to reach a maître. \`send_message\` resolves targets
+   from the vendangeur KV registry and cannot address maîtres. Maître relay requires
+   \`aoc notify --parcelle <parcelle>\`, which publishes to the parcelle notifications
+   subject each maître subscribes to.
+
+5. **Handle missing maîtres** — if a target maître is not running, say so rather than
+   failing silently. The operator can decide whether to spawn it first.
+`;
+
+// ── Régisseur maître-report guidance (régisseur role only) ───
+// Anti-loop: maître reports are passive FYI — the régisseur must absorb them
+// silently and never auto-respond or reflexively call get_maitre_status.
+const REGISSEUR_MAITRE_REPORT_GUIDANCE = `
+
+---
+## Régisseur — receiving live maître reports
+
+You will occasionally receive messages tagged \`[maître:<parcelle> · FYI / no action needed]\`. These are push notifications from a running maître, equivalent to a dashboard tick.
+
+Rules:
+- **Absorb silently.** Read the report for awareness. Do NOT reply, do NOT call \`get_maitre_status\` (the push already delivered the content — pulling is redundant), and do NOT offer to relay a message back to the maître as a reflex.
+- **No relay-offer triggered by a report.** The Phase-3 relay (relaying operator messages to maîtres) is initiated ONLY by the operator's conversation, never automatically in response to an incoming report.
+- **Act only on explicit blockers.** If a report clearly flags a blocker or gate that requires YOUR decision (not just awareness), then act on the underlying need — do not "request status" (you already have it).
+- **Default: end the turn with zero tool calls.** Receiving a maître report is not a reason to start work; it is information.
+`;
+
 const NATS_URL = process.env.PINARD_NATS_URL || "";
 const NATS_CREDS = process.env.PINARD_NATS_CREDS || "";
 const NATS_USER = process.env.PINARD_NATS_USER || "";
@@ -232,6 +307,9 @@ let kvSchedules: KV | null = null;
 let natsSubscriptions: Subscription[] = [];
 let piRef: ExtensionAPI | null = null;
 
+// ── Maître status report (IS_MAITRE only) ────────────────────
+let kvMaitreStatus: KV | null = null;
+
 // ── Agent Events ──────────────────────────────────────────────
 
 interface AgentEvent {
@@ -252,6 +330,23 @@ const pendingBtwReplies = new Map<string, {
   resolve: (response: string) => void;
   timer: ReturnType<typeof setTimeout>;
 }>();
+
+// ── Pending Maître Report Requests (régisseur only) ───────────
+// Keyed by correlation_id; resolved when the maître's report arrives on the
+// maitre.*.report subject carrying the same correlation_id.
+
+const pendingMaitreReports = new Map<string, {
+  resolve: (report: string) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+// ── Pending Report Request stash (maître side only) ──────────
+// When a report-request notification arrives, the maître stashes its
+// correlation_id here so that when the LLM calls report_to_regisseur,
+// the tool can attach it to the published payload mechanically.
+// Last-wins for concurrent requests (acceptable for v1).
+
+let pendingReportRequest: { correlation_id: string; context?: string } | null = null;
 
 // ── Pending Ack Queue ────────────────────────────────────────
 
@@ -286,13 +381,28 @@ function daemonAlive(): boolean {
 function refreshStatusLine(): void {
   const c = sessionCtx;
   if (!c) return;
-  const daemonDot = daemonAlive() ? "⚙️" : "⚠️";
+  const daemonDot = daemonAlive() ? "🔋" : "⚠️";
   const natsDot = nc ? "📡" : "○";
   const pending = pendingAckEvents.length;
   const inbox = pending > 0 ? ` 📬 Inbox(${pending})` : "";
-  // engram cloud reachability + KV sync queue status.
+  // Memory status token: unified (ingester) when available, else engram-only fallback.
   let engram = "";
-  if (ENGRAM_SERVER) {
+  if (memStatusAvailable) {
+    // Health = pipelines working. needs_review is a human backlog (not health) so
+    // it's intentionally excluded. Per-subsystem emoji: 🎬 engram episode replication
+    // (local→cloud), 🕸️ SurrealDB entity/relation graph (cloud→ingest), 📖 wiki curation.
+    const isOk = memStatusLag === 0 && memStatusFailed === 0 && !memStatusWikiStale;
+    if (isOk) {
+      engram = " 🧠 mem ok";
+    } else {
+      const parts: string[] = [];
+      if (memStatusPending > 0) parts.push(`🎬 ${memStatusPending}`);
+      if (memStatusLag > 0) parts.push(`🕸️ ${memStatusLag}`);
+      if (memStatusFailed > 0) parts.push(`🕸️ ${memStatusFailed} failed`);
+      if (memStatusWikiStale) parts.push(`📖 stale`);
+      engram = ` 🧠 mem ⚠ (${parts.join(" · ")})`;
+    }
+  } else if (ENGRAM_SERVER) {
     let syncInfo = "";
     if (engramKVDegraded && engramKVPending > 0) {
       syncInfo = ` (${engramKVPending} ⏳ ⚠️)`;
@@ -327,6 +437,47 @@ async function checkEngramReachable(): Promise<void> {
     engramReachable = false;
   }
   if (engramReachable !== prev) refreshStatusLine();
+}
+
+// Poll the memory-ingester status handler and update module state.
+async function checkMemoryStatus(): Promise<void> {
+  if (!nc || !VIGNOBLE_NAME) return;
+  const subject = `pinard.${VIGNOBLE_NAME}.memory-status`;
+  try {
+    const msg = await nc.request(subject, new TextEncoder().encode("{}"), { timeout: 8_000 });
+    const resp = JSON.parse(new TextDecoder().decode(msg.data)) as {
+      engram?: { reachable?: boolean; pending?: number };
+      surrealdb?: { total_lag?: number; total_failed?: number };
+      wiki?: { total_docs?: number; last_rollup?: string };
+    };
+    const lag = resp.surrealdb?.total_lag ?? 0;
+    const failed = resp.surrealdb?.total_failed ?? 0;
+    const pending = resp.engram?.pending ?? 0;
+    // Wiki health = "is curation/ingestion working", not the human-review backlog.
+    // Stale = the vignoble has wiki docs but the curator/rollup hasn't run in >3d
+    // (or never) — a real signal that wiki ingestion stalled.
+    const wikiDocs = resp.wiki?.total_docs ?? 0;
+    const lastRollup = resp.wiki?.last_rollup ?? "";
+    let wikiStale = false;
+    if (wikiDocs > 0) {
+      const ts = lastRollup ? Date.parse(lastRollup) : NaN;
+      wikiStale = Number.isNaN(ts) || (Date.now() - ts) > 3 * 24 * 60 * 60 * 1000;
+    }
+    const changed = !memStatusAvailable || lag !== memStatusLag || failed !== memStatusFailed ||
+                    wikiStale !== memStatusWikiStale || pending !== memStatusPending;
+    memStatusAvailable = true;
+    memStatusLag = lag;
+    memStatusFailed = failed;
+    memStatusWikiStale = wikiStale;
+    memStatusPending = pending;
+    if (changed) refreshStatusLine();
+  } catch {
+    // Ingester not running or timeout — fall back to engram-only display.
+    if (memStatusAvailable) {
+      memStatusAvailable = false;
+      refreshStatusLine();
+    }
+  }
 }
 
 // Read one entry from the pinard-engram KV key and update module state.
@@ -572,11 +723,13 @@ async function handleAgentEvent(type: string, sessionId: string, data: Record<st
   }
 
   refreshDashboardWidget();
+
 }
 
 function getRecentAgentEvents(count = 15): AgentEvent[] {
   return agentEvents.slice(-count);
 }
+
 
 // ── NATS Connection ───────────────────────────────────────────
 
@@ -625,6 +778,7 @@ async function connectNats(retries = 2): Promise<void> {
     if (ENGRAM_SERVER) {
       try { kvEngram = await kvm.open("pinard-engram"); } catch { kvEngram = null; }
     }
+    try { kvMaitreStatus = await kvm.create("pinard-maitre-status", { history: 1 }); } catch { kvMaitreStatus = null; }
 
     // Durable consumer for agent events — catches up on missed messages.
     // Maîtres get a per-parcelle durable; the dashboard keeps the vignoble one.
@@ -733,9 +887,14 @@ async function connectNats(retries = 2): Promise<void> {
         const messages = await notifConsumer.consume();
         for await (const msg of messages) {
           try {
-            const data = msg.json<{ message: string; timestamp: string }>();
+            const data = msg.json<{ message?: string; timestamp: string; type?: string; correlation_id?: string; context?: string }>();
+            if (IS_MAITRE && data.type === "report-request") {
+              handleMaitreReportRequest(data.correlation_id, data.context);
+              msg.ack();
+              continue;
+            }
             if (piRef) {
-              piRef.sendUserMessage(`[agent-notification] ${data.message}`, { deliverAs: "followUp" });
+              piRef.sendUserMessage(`[agent-notification] ${data.message ?? ""}`, { deliverAs: "followUp" });
             }
             msg.ack();
           } catch { msg.ack(); }
@@ -748,9 +907,13 @@ async function connectNats(retries = 2): Promise<void> {
       (async () => {
         for await (const msg of notifSub) {
           try {
-            const data = msg.json<{ message: string; timestamp: string }>();
+            const data = msg.json<{ message?: string; timestamp: string; type?: string; correlation_id?: string; context?: string }>();
+            if (IS_MAITRE && data.type === "report-request") {
+              handleMaitreReportRequest(data.correlation_id, data.context);
+              continue;
+            }
             if (piRef) {
-              piRef.sendUserMessage(`[agent-notification] ${data.message}`, { deliverAs: "followUp" });
+              piRef.sendUserMessage(`[agent-notification] ${data.message ?? ""}`, { deliverAs: "followUp" });
             }
           } catch {}
         }
@@ -866,6 +1029,49 @@ async function connectNats(retries = 2): Promise<void> {
         }
       })();
     }
+
+    // Live maître report push (core NATS — real-time, no persistence needed).
+    // Debounced per parcelle so rapid bursts are coalesced before delivery.
+    // Fail-open: errors inside the loop never disrupt the régisseur.
+    try {
+      const maitreReportSub = nc!.subscribe(`pinard.${VIGNOBLE_NAME}.maitre.*.report`);
+      natsSubscriptions.push(maitreReportSub);
+      const maitreReportDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+      (async () => {
+        for await (const msg of maitreReportSub) {
+          try {
+            const data = msg.json<{ report?: string; parcelle?: string; timestamp?: string; correlation_id?: string }>();
+            // Extract parcelle from payload first, then fall back to subject segment
+            const parts = msg.subject.split(".");
+            const parcelle = data.parcelle || parts[parts.length - 2] || "unknown";
+            const report = data.report || "(no report content)";
+            // Resolve a pending named request if correlation_id matches.
+            // Suppress the FYI for correlated reports — the régisseur explicitly
+            // requested this one and will receive it as the tool result.
+            let resolvedPending = false;
+            if (data.correlation_id) {
+              const pending = pendingMaitreReports.get(data.correlation_id);
+              if (pending) {
+                clearTimeout(pending.timer);
+                pendingMaitreReports.delete(data.correlation_id);
+                pending.resolve(report);
+                resolvedPending = true;
+              }
+            }
+            if (!resolvedPending) {
+              const prior = maitreReportDebounce.get(parcelle);
+              if (prior) clearTimeout(prior);
+              maitreReportDebounce.set(parcelle, setTimeout(() => {
+                maitreReportDebounce.delete(parcelle);
+                if (piRef) {
+                  piRef.sendUserMessage(`[maître:${parcelle} · FYI / no action needed] ${report}`, { deliverAs: "followUp" });
+                }
+              }, 250));
+            }
+          } catch {}
+        }
+      })();
+    } catch {}
     } // end !IS_MAITRE (vignoble-level consumers)
 
     // Watch agent KV for cache updates
@@ -1267,9 +1473,9 @@ const readIssueTool = defineTool({
 const sendMessageTool = defineTool({
   name: "send_message",
   label: "Send Message to Agent",
-  description: "Send a message to a background Claude agent. Use ask: true to get an immediate response via the btw channel (parallel side-conversation). Without ask, the message is delivered to the vendangeur's main inbox (queued until current turn ends).",
+  description: "Send a message to a background Claude agent or maître. Resolution order: (1) vendangeur via kvAgents KV lookup; (2) maître via 'pinard-maitre-<vignoble>-<parcelle>' session ID or 'parcelle:<name>' shorthand — delivers to that maître's notifications subject (fire-and-forget; btw round-trip not supported for maîtres). Use ask: true to get an immediate response via the btw channel (vendangeurs only). Without ask, the message is delivered to the vendangeur's main inbox (queued until current turn ends).",
   parameters: Type.Object({
-    session: Type.String({ description: "Session ID of the background agent" }),
+    session: Type.String({ description: "Session ID of the target agent. Vendangeur: session name or RUN_ID. Maître: 'pinard-maitre-<vignoble>-<parcelle>' or 'parcelle:<name>'." }),
     message: Type.String({ description: "Message to send to the agent" }),
     ask: Type.Optional(Type.Boolean({ description: "If true, send via btw channel and wait for reply (up to 60s)" })),
     inject: Type.Optional(Type.Boolean({ description: "If true (with ask: true), inject the btw thread into the vendangeur's main conversation" })),
@@ -1297,6 +1503,24 @@ const sendMessageTool = defineTool({
           }
         }
         if (!entry || entry.value.length === 0) {
+          // Maître target resolution: pinard-maitre-<vignoble>-<parcelle> or parcelle:<name>
+          let maitreParcelleTarget: string | null = null;
+          const maitrePrefix = `pinard-maitre-${VIGNOBLE_NAME}-`;
+          if (session.startsWith(maitrePrefix)) {
+            maitreParcelleTarget = session.slice(maitrePrefix.length);
+          } else if (session.startsWith("parcelle:")) {
+            maitreParcelleTarget = session.slice("parcelle:".length);
+          }
+          if (maitreParcelleTarget) {
+            const notifSubject = `pinard.${VIGNOBLE_NAME}.parcelles.${maitreParcelleTarget}.notifications`;
+            try {
+              natsPublish(notifSubject, { message, timestamp: new Date().toISOString() });
+              const note = params.ask ? " (btw round-trip not supported for maîtres; delivered fire-and-forget)" : "";
+              return { content: [{ type: "text" as const, text: `Message sent to maître ${maitreParcelleTarget}${note}` }], details: undefined };
+            } catch (e: any) {
+              return { content: [{ type: "text" as const, text: `Failed to send to maître ${maitreParcelleTarget}: ${e.message}` }], details: undefined };
+            }
+          }
           return { content: [{ type: "text" as const, text: `Vendangeur ${session} is not running (not found in KV)` }], details: undefined };
         }
         const state = entry.json<Record<string, any>>();
@@ -1464,7 +1688,7 @@ const spawnAgentTool = defineTool({
 const createCuveeTool = defineTool({
   name: "create_cuvee",
   label: "Create Cuvee Branch",
-  description: "Create a cuvee (intermediate) branch for accumulating multiple agent MRs before merging to main. Use when spawning multiple agents on the same project to avoid CI conflicts.",
+  description: "Create a cuvee (intermediate) branch for accumulating multiple agent MRs before merging to the repo default branch. Use when spawning multiple agents on the same project to avoid CI conflicts.",
   parameters: Type.Object({
     project: Type.String({ description: "Vigne/project name from vignes.yaml" }),
     name: Type.String({ description: "Cuvee name (e.g., 'update-docs')" }),
@@ -1501,12 +1725,13 @@ const createCuveeTool = defineTool({
 const openCuveeMRTool = defineTool({
   name: "open_cuvee_mr",
   label: "Open Cuvee MR",
-  description: "Open a merge request from a cuvee branch to main, after all agent work is accumulated on the cuvee branch.",
+  description: "Open a merge request from a cuvee branch to the repo default branch, after all agent work is accumulated on the cuvee branch.",
   parameters: Type.Object({
     project: Type.String({ description: "Vigne/project name from vignes.yaml" }),
     branch: Type.String({ description: "Cuvee branch name (e.g., cuvee/update-docs)" }),
     title: Type.String({ description: "MR title for the combined changes" }),
     description: Type.Optional(Type.String({ description: "MR description" })),
+    target_branch: Type.Optional(Type.String({ description: "Target branch for the MR (default: repo default branch)" })),
   }),
   async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
     const { project, branch, title } = params;
@@ -1515,11 +1740,20 @@ const openCuveeMRTool = defineTool({
       const repo = resolveProjectRepo(project);
       const encodedRepo = encodeURIComponent(repo);
       const host = gitlabHost();
+      let targetBranch = params.target_branch || getVignes()[project]?.default_branch || "";
+      if (!targetBranch) {
+        try {
+          const apiResult = execFileSync("glab", ["api", `projects/${encodedRepo}`, "--hostname", host], { encoding: "utf8" });
+          targetBranch = JSON.parse(apiResult).default_branch || "main";
+        } catch {
+          targetBranch = "main";
+        }
+      }
       const result = execFileSync("glab", [
         "api", `projects/${encodedRepo}/merge_requests`,
         "-X", "POST", "--hostname", host,
         "-f", `source_branch=${branch}`,
-        "-f", "target_branch=main",
+        "-f", `target_branch=${targetBranch}`,
         "-f", `title=${title}`,
         "-f", `description=${params.description || "Cuvee merge — accumulated changes from multiple agents."}`,
       ], { encoding: "utf8" });
@@ -1635,6 +1869,280 @@ const attachParcelleTool = defineTool({
   },
 });
 
+
+// buildFallbackReport — derives a minimal status summary from the in-process
+// agentEvents ring buffer. Used ONLY as a timeout fallback when the maître's LLM
+// does not respond in time. Returns null when there are no events.
+function buildFallbackReport(): string | null {
+  const events = agentEvents.slice();
+  if (events.length === 0) return null;
+
+  const COMPLETION_TYPES = new Set(["mr_merged", "auto_merged", "session_ended", "pipeline_passed", "main_pipeline_passed"]);
+  const GATE_TYPES = new Set(["process_gate_pending", "breakpoint", "needs_approval", "pipeline_failed", "main_pipeline_failed"]);
+
+  const recentCompletions: string[] = [];
+  const pendingGates: string[] = [];
+  const seen = new Set<string>();
+
+  for (let i = events.length - 1; i >= 0 && (recentCompletions.length < 5 || pendingGates.length < 5); i--) {
+    const ev = events[i];
+    const project = ev.data._project || ev.data.project || ev.sessionId;
+    const mr = ev.data.mr ? `!${ev.data.mr}` : "";
+    const key = `${ev.type}:${project}:${mr}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (COMPLETION_TYPES.has(ev.type) && recentCompletions.length < 5) {
+      if (ev.type === "mr_merged" || ev.type === "auto_merged") recentCompletions.push(`${mr} on ${project} merged`);
+      else if (ev.type === "session_ended") recentCompletions.push(`${project} session ended`);
+      else if (ev.type === "pipeline_passed" || ev.type === "main_pipeline_passed") recentCompletions.push(`${project} pipeline passed`);
+    } else if (GATE_TYPES.has(ev.type) && pendingGates.length < 5) {
+      if (ev.type === "needs_approval") pendingGates.push(`${mr} on ${project} needs approval`);
+      else if (ev.type === "process_gate_pending" || ev.type === "breakpoint") pendingGates.push(`${project} ${ev.type.replace(/_/g, " ")}`);
+      else if (ev.type === "pipeline_failed" || ev.type === "main_pipeline_failed") pendingGates.push(`${project} ${ev.type.replace(/_/g, " ")}`);
+    }
+  }
+
+  const last = events[events.length - 1];
+  const lastProject = last.data._project || last.data.project || last.sessionId;
+  const lastMr = last.data.mr ? ` !${last.data.mr}` : "";
+  const focusMap: Record<string, string> = {
+    mr_merged: `merged ${lastMr} on ${lastProject}`, auto_merged: `auto-merged ${lastMr} on ${lastProject}`,
+    needs_approval: `awaiting approval for ${lastMr} on ${lastProject}`,
+    pipeline_failed: `pipeline failure on ${lastProject}`, main_pipeline_failed: `main pipeline failure on ${lastProject}`,
+    process_gate_pending: `process gate pending on ${lastProject}`, breakpoint: `breakpoint on ${lastProject}`,
+    session_ended: `session ended for ${lastProject}`, pipeline_passed: `pipeline passed on ${lastProject}`,
+    main_pipeline_passed: `main pipeline passed on ${lastProject}`,
+  };
+  const focus = focusMap[last.type] || `handling ${last.type} on ${lastProject}`;
+  const fmt = (label: string, items: string[]) =>
+    items.length > 0 ? `${label}\n${items.map(i => `  • ${i}`).join("\n")}` : `${label} (none)`;
+
+  return [
+    `── ${PARCELLE} ──`,
+    fmt("recent completions:", recentCompletions),
+    fmt("pending gates:", pendingGates),
+    `current focus:\n  ${focus}`,
+  ].join("\n");
+}
+
+// handleMaitreReportRequest — maître-only. On a report-request notification:
+// 1. Stashes the correlation_id (and optional context) so report_to_regisseur
+//    can attach it mechanically when the LLM calls it.
+// 2. Delivers a followUp prompt to the maître LLM asking it to call
+//    report_to_regisseur. The LLM authors a fresh, structured report.
+function handleMaitreReportRequest(correlation_id?: string, context?: string): void {
+  if (!IS_MAITRE) return;
+  // Stash — last-wins for concurrent requests (acceptable for v1).
+  pendingReportRequest = { correlation_id: correlation_id ?? "", context };
+  const contextLine = context ? ` Regarding: ${context}.` : "";
+  const prompt = `[report-request from régisseur] Please call \`report_to_regisseur\` now to send a fresh status report about this parcelle.${contextLine} Report once and stop.`;
+  try {
+    if (piRef) piRef.sendUserMessage(prompt, { deliverAs: "followUp" });
+    require("node:fs").appendFileSync(require("node:path").join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-report-request] LLM turn triggered (corr=${correlation_id ?? ""})\n`);
+  } catch (e: any) {
+    try { require("node:fs").appendFileSync(require("node:path").join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-report-request] error triggering LLM: ${e.message}\n`); } catch {}
+  }
+}
+
+// report_to_regisseur — maître-only tool. The maître calls this when it judges a
+// status update is warranted (e.g. after a vendangeur completes, an MR merges, or
+// a gate opens). Publishes the report to a core NATS subject and upserts a KV
+// snapshot so late-joining régisseurs can read the latest state.
+const reportToRegisseurTool = IS_MAITRE ? defineTool({
+  name: "report_to_regisseur",
+  label: "Report to Régisseur",
+  description: "Send a status report about this parcelle to the régisseur. Call this when something significant happens (vendangeur completed, MR merged/opened, gate pending, blocker hit) or when you judge the régisseur would benefit from an update. The report is also stored in a KV snapshot for late-joining régisseurs.",
+  parameters: Type.Object({
+    recent_completions: Type.Array(Type.String(), { description: "Short bullet items for recently completed work (e.g. '#228 boot-index — MR !312 opened'). Use empty array if none." }),
+    pending_gates: Type.Array(Type.String(), { description: "Short bullet items for work awaiting action (e.g. 'my-project-build breakpoint awaiting approval'). Use empty array if none." }),
+    current_focus: Type.String({ description: "One line describing what this parcelle is currently focused on, or '(idle)' if nothing active." }),
+  }),
+  async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    try {
+      const fmt = (label: string, items: string[]) =>
+        items.length > 0
+          ? `${label}\n${items.map(i => `  • ${i}`).join("\n")}`
+          : `${label} (none)`;
+      const report = [
+        `── ${PARCELLE} ──`,
+        fmt("recent completions:", params.recent_completions),
+        fmt("pending gates:", params.pending_gates),
+        `current focus:\n  ${params.current_focus}`,
+      ].join("\n");
+      const timestamp = new Date().toISOString();
+      const subject = `pinard.${VIGNOBLE_NAME}.maitre.${PARCELLE}.report`;
+      // Attach stashed correlation_id (from a pending report-request) if present,
+      // then clear it so it is not re-used by subsequent spontaneous reports.
+      const correlation_id = pendingReportRequest?.correlation_id;
+      pendingReportRequest = null;
+      const payload = new TextEncoder().encode(JSON.stringify({ report, timestamp, parcelle: PARCELLE, vignoble: VIGNOBLE_NAME, ...(correlation_id ? { correlation_id } : {}) }));
+      if (nc) nc.publish(subject, payload);
+      if (kvMaitreStatus) await kvMaitreStatus.put(`${VIGNOBLE_NAME}.${PARCELLE}`, payload);
+      try { require("node:fs").appendFileSync(require("node:path").join(VIGNOBLE, "logs", "conductor.log"), `${timestamp} [maitre-report] published to ${subject}${correlation_id ? ` (corr=${correlation_id})` : ""}\n`); } catch {}
+      return { content: [{ type: "text" as const, text: `Report sent to régisseur (${subject}).` }], details: undefined };
+    } catch (e: any) {
+      try { require("node:fs").appendFileSync(require("node:path").join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-report] publish error (non-fatal): ${e.message}\n`); } catch {}
+      return { content: [{ type: "text" as const, text: `Report failed (non-fatal): ${e.message}` }], details: undefined };
+    }
+  },
+}) : null;
+
+// get_maitre_status — régisseur-only cross-parcelle board.
+// Reads all KV snapshots from pinard-maitre-status, renders one block per
+// parcelle, flags stale entries, and sorts by most-recently-updated.
+const MAITRE_STATUS_STALE_MS = 15 * 60 * 1000;
+
+function formatAge(timestamp: string): string {
+  const ageMs = Date.now() - new Date(timestamp).getTime();
+  const ageSec = Math.floor(ageMs / 1000);
+  if (ageSec < 60) return `${ageSec}s ago`;
+  const ageMin = Math.floor(ageSec / 60);
+  if (ageMin < 60) return `${ageMin}m ago`;
+  const ageHr = Math.floor(ageMin / 60);
+  return `${ageHr}h ago`;
+}
+
+const MAITRE_REPORT_REQUEST_TIMEOUT_MS = 35_000;
+
+// readKvSnapshot: read a single parcelle's KV snapshot, or null if missing.
+async function readKvSnapshot(parcelle: string): Promise<{ report: string; timestamp: string; ageMs: number } | null> {
+  if (!kvMaitreStatus) return null;
+  try {
+    const key = `${VIGNOBLE_NAME}.${parcelle}`;
+    const entry = await kvMaitreStatus.get(key);
+    if (!entry || !entry.value || entry.value.length === 0) return null;
+    const parsed = JSON.parse(new TextDecoder().decode(entry.value)) as { report?: string; timestamp?: string };
+    const report = parsed.report || "";
+    const timestamp = parsed.timestamp || "";
+    const ageMs = timestamp ? Date.now() - new Date(timestamp).getTime() : Infinity;
+    return { report, timestamp, ageMs };
+  } catch {
+    return null;
+  }
+}
+
+const getMaitreStatusTool = !IS_MAITRE ? defineTool({
+  name: "get_maitre_status",
+  label: "Get Maître Status",
+  description: "Get maître status. With parcelle: triggers the target maître's LLM to author and send a fresh structured report (via its \`report_to_regisseur\` tool), then returns it — waits up to 35s. Optional \`context\` focuses the report (e.g. 'report regarding CI stability'). On timeout, falls back to event-derived facts from the maître (with an explicit unauthored/staleness note). Without parcelle: cross-parcelle board of cached KV snapshots with ages (stale > 15 min flagged).",
+  parameters: Type.Object({
+    parcelle: Type.Optional(Type.String({ description: "Name of the parcelle to request a fresh LLM-authored report from. Omit to get the full cross-parcelle board of cached snapshots." })),
+    context: Type.Optional(Type.String({ description: "Optional focus for the report, e.g. 'report regarding CI stability'. Passed to the maître so it tailors the report." })),
+  }),
+  async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    // Named-parcelle mode: trigger maître LLM turn and wait for authored report
+    if (params.parcelle) {
+      const targetParcelle = params.parcelle;
+      const correlation_id = require("node:crypto").randomUUID().slice(0, 12);
+      const requestedAt = Date.now();
+
+      // Publish report-request to the maître's notifications subject
+      const notifSubject = `pinard.${VIGNOBLE_NAME}.parcelles.${targetParcelle}.notifications`;
+      try {
+        natsPublish(notifSubject, { type: "report-request", correlation_id, context: params.context, timestamp: new Date().toISOString() });
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Failed to send report-request to maître ${targetParcelle}: ${e.message}` }], details: undefined };
+      }
+
+      // Wait for the LLM-authored report (resolved by maitreReportSub when correlation_id matches)
+      const freshReport = await new Promise<string | null>((resolve) => {
+        const timer = setTimeout(() => {
+          pendingMaitreReports.delete(correlation_id);
+          resolve(null);
+        }, MAITRE_REPORT_REQUEST_TIMEOUT_MS);
+        pendingMaitreReports.set(correlation_id, { resolve, timer });
+      });
+
+      if (freshReport !== null) {
+        return { content: [{ type: "text" as const, text: freshReport }], details: undefined };
+      }
+
+      // Timeout: fall back to KV snapshot, then event-derived facts, with a clear unauthored note
+      const elapsed = Math.round((Date.now() - requestedAt) / 1000);
+      const snapshot = await readKvSnapshot(targetParcelle);
+      if (snapshot && snapshot.report) {
+        const snapshotAge = formatAge(snapshot.timestamp);
+        const staleTag = snapshot.ageMs > MAITRE_STATUS_STALE_MS ? " [STALE]" : "";
+        return {
+          content: [{ type: "text" as const, text: `${snapshot.report}\n(maître did not respond within ${elapsed}s; showing last LLM-authored snapshot ${snapshotAge}${staleTag})` }],
+          details: undefined,
+        };
+      }
+      // No KV snapshot — try event-derived fallback
+      const fallback = buildFallbackReport();
+      if (fallback) {
+        return {
+          content: [{ type: "text" as const, text: `${fallback}\n(maître did not respond within ${elapsed}s; showing event-derived facts — not LLM-authored)` }],
+          details: undefined,
+        };
+      }
+      return {
+        content: [{ type: "text" as const, text: `No fresh report from maître ${targetParcelle} within ${elapsed}s; no cached snapshot available.` }],
+        details: undefined,
+      };
+    }
+
+    // Board mode: all KV snapshots
+    if (!kvMaitreStatus) {
+      return { content: [{ type: "text" as const, text: "No maître status reports yet." }], details: undefined };
+    }
+    interface SnapshotEntry {
+      parcelle: string;
+      report: string;
+      timestamp: string;
+      ageMs: number;
+    }
+    const entries: SnapshotEntry[] = [];
+    try {
+      const keys: string[] = [];
+      for await (const key of await kvMaitreStatus.keys()) {
+        keys.push(key);
+      }
+      for (const key of keys) {
+        // Key format: <vignoble>.<parcelle>
+        const parcelle = key.includes(".") ? key.slice(key.indexOf(".") + 1) : key;
+        try {
+          const entry = await kvMaitreStatus.get(key);
+          if (!entry || !entry.value || entry.value.length === 0) {
+            entries.push({ parcelle, report: "", timestamp: "", ageMs: Infinity });
+            continue;
+          }
+          const raw = new TextDecoder().decode(entry.value);
+          const parsed = JSON.parse(raw) as { report?: string; timestamp?: string; parcelle?: string };
+          const report = parsed.report || "";
+          const timestamp = parsed.timestamp || "";
+          const ageMs = timestamp ? Date.now() - new Date(timestamp).getTime() : Infinity;
+          entries.push({ parcelle: parsed.parcelle || parcelle, report, timestamp, ageMs });
+        } catch {
+          entries.push({ parcelle, report: "", timestamp: "", ageMs: Infinity });
+        }
+      }
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      if (msg.includes("stream not found") || msg.includes("not found")) {
+        return { content: [{ type: "text" as const, text: "No maître status reports yet." }], details: undefined };
+      }
+      return { content: [{ type: "text" as const, text: `Failed to read maître status KV: ${msg}` }], details: undefined };
+    }
+    if (entries.length === 0) {
+      return { content: [{ type: "text" as const, text: "No maître status reports yet." }], details: undefined };
+    }
+    // Sort by most-recently-updated (lowest ageMs first), fallback alphabetical
+    entries.sort((a, b) => {
+      if (a.ageMs !== b.ageMs) return a.ageMs - b.ageMs;
+      return a.parcelle.localeCompare(b.parcelle);
+    });
+    const blocks = entries.map(({ parcelle, report, timestamp, ageMs }) => {
+      if (!report || !timestamp) {
+        return `── ${parcelle} ──\n(no report yet)`;
+      }
+      const age = formatAge(timestamp);
+      const staleTag = ageMs > MAITRE_STATUS_STALE_MS ? " [STALE]" : "";
+      return `${report}\n(updated ${age}${staleTag})`;
+    });
+    return { content: [{ type: "text" as const, text: blocks.join("\n\n") }], details: undefined };
+  },
+}) : null;
 
 let _vignesCache: Record<string, Record<string, string>> | null = null;
 let _vignesCacheTime = 0;
@@ -2764,6 +3272,8 @@ export default function pinard(pi: ExtensionAPI) {
   pi.registerTool(listWorkersTool);
   pi.registerTool(listParcellesTool);
   pi.registerTool(attachParcelleTool);
+  if (IS_MAITRE && reportToRegisseurTool) pi.registerTool(reportToRegisseurTool);
+  if (!IS_MAITRE && getMaitreStatusTool) pi.registerTool(getMaitreStatusTool);
   pi.registerTool(getNotificationsTool);
   pi.registerTool(getSchedulesTool);
   pi.registerTool(createIssueTool);
@@ -3447,14 +3957,26 @@ export default function pinard(pi: ExtensionAPI) {
           ctx.ui.notify(`Failed to attach maître for ${name}: ${e.message || e}`, "error");
           return;
         }
+        // Ask the maître for status over NATS (the same comms path as
+        // get_maitre_status / the régisseur relay) instead of tmux send-keys.
+        // Keystroke injection is fragile (it races the maître's Pi TUI
+        // bracketed-paste input, so text+Enter in one shot leaves the prompt
+        // sitting unsubmitted) and assumes a local tmux pane a remote maître
+        // would not have. `aoc notify --parcelle` publishes to the parcelle
+        // notifications subject the maître subscribes to; the maître then
+        // processes the ask in its own conversation, visible in its pane.
         const askPrompt = "Report this parcelle's status: active vendangeurs, recent runs, and any pending gates.";
         const sendAsk = () => {
           try {
-            execSync(`tmux -L ${socket} send-keys -t ${JSON.stringify("conductor:" + win)} ${JSON.stringify(askPrompt)} Enter`, { timeout: 5000 });
+            execSync(`${AOC} notify --parcelle ${JSON.stringify(name)} ${JSON.stringify(askPrompt)}`, { timeout: 8000 });
           } catch {}
         };
+        // The notifications subject is JetStream-durable, so the ask is retained
+        // and delivered once the maître's consumer is up (reliable even cold).
+        // For a freshly-spawned maître we still stagger the send so its window is
+        // attached first and the ask arrives after it has booted.
         if (preExisted) sendAsk();
-        else setTimeout(sendAsk, 8000); // give a cold maître time to boot its TUI
+        else setTimeout(sendAsk, 8000);
       };
 
       // List all parcelles with status
@@ -3922,6 +4444,10 @@ If the tasks span multiple repos, create an epic first with: aoc epic --title "$
       // KV watch for sync queue state (live updates from daemon).
       startEngramKVWatch();
     }
+    // Unified memory status: probe ingester now + every 5 min.
+    if (memStatusInterval) clearInterval(memStatusInterval);
+    void checkMemoryStatus();
+    memStatusInterval = setInterval(() => { void checkMemoryStatus(); }, 5 * 60_000);
     slog("session_start: handler complete");
   });
 
@@ -3936,6 +4462,7 @@ If the tasks span multiple repos, create an epic first with: aoc epic --title "$
     if (engramReachableInterval) { clearInterval(engramReachableInterval); engramReachableInterval = null; }
     if (engramKVWatchInterval) { clearInterval(engramKVWatchInterval); engramKVWatchInterval = null; }
     if (engramClearTimer) { clearTimeout(engramClearTimer); engramClearTimer = null; }
+    if (memStatusInterval) { clearInterval(memStatusInterval); memStatusInterval = null; }
     if (inProgressTimer) { clearInterval(inProgressTimer); inProgressTimer = null; }
     try { if (engramKVWatcher && typeof (engramKVWatcher as any).return === "function") (engramKVWatcher as any).return(); } catch {}
     engramKVWatcher = null;
@@ -3959,6 +4486,7 @@ If the tasks span multiple repos, create an epic first with: aoc epic --title "$
     kvMRs = null;
     kvSchedules = null;
     kvEngram = null;
+    kvMaitreStatus = null;
   });
 
   // Clear stale gentle-engram result badge (e.g. "✓ saved #64") from the "engram"
@@ -4029,6 +4557,15 @@ If the tasks span multiple repos, create an epic first with: aoc epic --title "$
   //   🌿 distinct workstream-parcelles with workers (cross-cutting; name is NOT a
   //      vigne). Repo-parcelles (🌱) fall out of the worker count, so they are not
   //      counted separately here.
+
+  // Append régisseur-only relay guidance to the system prompt each turn.
+  // Gated on !IS_MAITRE so maîtres and vendangeurs never receive it.
+  if (!IS_MAITRE) {
+    pi.on("before_agent_start", (event: any, _ctx: any) => {
+      return { systemPrompt: event.systemPrompt + REGISSEUR_RELAY_GUIDANCE + REGISSEUR_MAITRE_REPORT_GUIDANCE };
+    });
+  }
+
   pi.on("turn_end", async (_event: any, _ctx: any) => {
     const workers = getWorkersCached();
     const total = workers.length;

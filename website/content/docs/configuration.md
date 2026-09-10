@@ -272,6 +272,18 @@ memory:
   vignes:
     data: ""            # Raw vignes.yaml content for the ScopeRollupEngine.
                         # Superseded when VIGNOBLES_BASE_DIR is set (see below).
+  config:
+    groupIds: ""        # Comma-separated group_ids to ingest (optional).
+                        # Leave empty (default) for full auto-discovery from cloud_mutations
+                        # (postgres source) or vignes.yaml (http source).
+                        # Set to restrict ingest to a subset during debugging or testing.
+  recall:
+    enabled: true       # Deploy the memory-recall Go binary as a separate workload.
+    resources: {}       # Pod resource requests/limits (cpu/memory).
+  rollup:
+    enabled: true       # Deploy the memory-rollup job on the configured schedule.
+    schedule: "0 * * * *"  # Cron expression for the rollup job (default: hourly).
+    resources: {}       # Pod resource requests/limits.
 ```
 
 With `ssh.vault.sshKey` set, the chart provisions:
@@ -284,14 +296,16 @@ With `ssh.vault.sshKey` set, the chart provisions:
 
 ### Environment variables for the memory service
 
-These are set by the Helm chart and control the curator/rollup engine at runtime:
+These are set by the Helm chart and control the ingester/curator/rollup engine at runtime:
 
 | Variable | Purpose |
 |----------|---------|
 | `VIGNOBLES_BASE_DIR` | **Required.** Parent dir of multiple vignoble clones. The memory service fails fast at startup if this is unset or the path does not exist. The rollup engine and wiki curator iterate all `vignoble-<name>/` subdirs automatically. |
 | `GLOBAL_WIKI_ROOT` | Filesystem path to the cloned global `pinard-wiki` repo. Used by the curator and inbound sync. |
+| `MEMORY_GROUP_IDS` | Comma-separated group IDs to ingest. **Optional** — when unset the ingester auto-discovers all groups from the postgres `cloud_mutations` table (or vignes.yaml for the http source). Set to a subset only when debugging or restricting scope temporarily. |
+| `PINARD_ONTOLOGY_DIRS` | Colon-separated directories to scan for domain ontology YAML files (`*.yaml`/`*.yml`/`*.json`). Combined with `<vignoble>/pinard/ontology/*.yaml` auto-discovery. Missing directories are non-fatal (logged warning). |
 
-Both variables are derived from `wikiRepos.cloneDir` by the Helm chart.
+All variables are derived from Helm values by the chart.
 
 ## Vignoble layout
 

@@ -1,0 +1,8 @@
+#!/bin/sh
+# webterm-gateway requires link + grant secrets to start.
+# If not configured, skip silently (sleep indefinitely so s6 doesn't loop).
+if [ -z "${WEBTERM_LINK_SECRET}" ] && [ -z "${WEBTERM_LINK_SECRET_ENV}" ]; then
+    echo "[webterm-gateway] WEBTERM_LINK_SECRET not set — skipping (webterm disabled)"
+    exec sleep inf
+fi
+exec webterm-gateway

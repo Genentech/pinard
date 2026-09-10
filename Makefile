@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: build install test typecheck dist clean-dist base os
+.PHONY: build install test typecheck dist clean-dist base os memory-binaries
 
 # Build + install the aoc Go binary (delegates to cmd/aoc).
 build:
@@ -8,6 +8,13 @@ build:
 
 install:
 	$(MAKE) -C cmd/aoc install
+
+# Build all memory service binaries.
+memory-binaries:
+	go build -trimpath -ldflags="-s -w" -o bin/memory-ingester ./cmd/memory-ingester
+	go build -trimpath -ldflags="-s -w" -o bin/memory-recall    ./cmd/memory-recall
+	go build -trimpath -ldflags="-s -w" -o bin/memory-rollup    ./cmd/memory-rollup
+	go build -trimpath -ldflags="-s -w" -o bin/memory-curator   ./cmd/memory-curator
 
 test:
 	go test ./internal/... ./cmd/aoc/

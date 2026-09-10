@@ -1,0 +1,2 @@
+#!/bin/sh
+exec wget -q --spider "http://127.0.0.1:8000/health" 2>/dev/null

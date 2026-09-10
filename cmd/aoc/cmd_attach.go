@@ -2,19 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
-	term "github.com/charmbracelet/x/term"
-	"github.com/nats-io/nats.go"
+	"crypto/rand"
+	"encoding/json"
 	"github.com/Genentech/pinard/internal/config"
 	"github.com/Genentech/pinard/internal/pnats"
 	"github.com/Genentech/pinard/internal/session"
 	"github.com/Genentech/pinard/internal/webterm"
+	term "github.com/charmbracelet/x/term"
+	"github.com/nats-io/nats.go"
 	"github.com/spf13/cobra"
 )
 
@@ -23,9 +25,8 @@ var attachCmd = &cobra.Command{
 	Short: "Stream a vendangeur's terminal output over NATS (read-only)",
 	Long: "Subscribes to a vendangeur session's live PTY output and renders it to the\n" +
 		"local terminal. The session is resolved from the pinard-agents KV by name,\n" +
-		"agentId, or runId. Authenticates with operator NATS credentials only — no\n" +
-		"grant or SSO is required for read-only access.\n\n" +
-		"For sessions running on this host a local PTY pump is started automatically.\n" +
+		"agentId, or runId. Uses the grant-gated responder protocol (same as the\n" +
+		"web gateway) — requires webterm.grant_secret in credentials.\n\n" +
 		"Press Ctrl+C to detach.",
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -34,10 +35,15 @@ var attachCmd = &cobra.Command{
 		}
 		token := args[0]
 		timeout, _ := cmd.Flags().GetDuration("timeout")
+		steer, _ := cmd.Flags().GetBool("steer")
 
 		creds, err := config.LoadCredentials()
 		if err != nil {
 			return fmt.Errorf("credentials: %w", err)
+		}
+		grantSecret := creds.WebtermGrantSecret()
+		if len(grantSecret) == 0 {
+			return fmt.Errorf("attach requires webterm.grant_secret in credentials")
 		}
 
 		vignoble := resolveVignobleName(cmd)
@@ -52,34 +58,57 @@ var attachCmd = &cobra.Command{
 		defer nc.Close()
 
 		kv := pnats.NewKV(nc)
-		sessionName, agentID := resolveAttachTarget(kv, token)
-		tmuxSocket := "pinard-" + vignoble
+		sessionName, _ := resolveAttachTarget(kv, token)
+
+		// Mint a short-lived grant (RO by default; RW only with --steer).
+		mode := webterm.ModeRO
+		if steer {
+			mode = webterm.ModeRW
+		}
+		exp := time.Now().Add(5 * time.Minute).Unix()
+		grant, err := webterm.SignGrant(webterm.Grant{
+			Vignoble: vignoble,
+			Target:   sessionName,
+			Mode:     mode,
+			Exp:      exp,
+		}, grantSecret)
+		if err != nil {
+			return fmt.Errorf("sign grant: %w", err)
+		}
+
+		// Generate a unique viewer ID for this attach session.
+		var rawID [8]byte
+		if _, err := rand.Read(rawID[:]); err != nil {
+			return fmt.Errorf("generate viewer id: %w", err)
+		}
+		viewerID := "cli-" + hex.EncodeToString(rawID[:])
+
+		cols, rows := 220, 50
+		if w, h, serr := term.GetSize(os.Stdout.Fd()); serr == nil {
+			cols, rows = w, h
+		}
+
+		// Send a ReqMsg to the responder and wait for acceptance.
+		reqData, _ := json.Marshal(webterm.ReqMsg{
+			Grant:    grant,
+			ViewerID: viewerID,
+			Cols:     cols,
+			Rows:     rows,
+		})
+		msg, err := nc.Conn().Request(webterm.ReqSubject(vignoble), reqData, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("no responder answered (is the daemon or webterm-responder running?): %w", err)
+		}
+		var reply webterm.ReqReply
+		if err := json.Unmarshal(msg.Data, &reply); err != nil {
+			return fmt.Errorf("bad responder reply: %w", err)
+		}
+		if !reply.OK {
+			return fmt.Errorf("responder rejected attach: %s", reply.Reason)
+		}
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
-
-		// For local sessions: start an in-process PTY pump (tmux → NATS).
-		local := isLocalSession(tmuxSocket, sessionName)
-		if local {
-			pump := &webterm.AgentPump{
-				NC:       nc.Conn(),
-				Vignoble: vignoble,
-				Socket:   tmuxSocket,
-				Session:  sessionName,
-				AgentID:  agentID,
-			}
-			if w, h, serr := term.GetSize(os.Stdout.Fd()); serr == nil {
-				pump.Cols = w
-				pump.Rows = h
-			}
-			go func() {
-				_ = pump.Run(ctx)
-			}()
-			// Brief settle so the pump can start publishing before we subscribe.
-			time.Sleep(50 * time.Millisecond)
-		}
-
-		outSubject := webterm.PtyOutSubject(vignoble, agentID)
 
 		// Put the local terminal into raw mode so escape sequences render correctly.
 		var oldState *term.State
@@ -97,15 +126,51 @@ var attachCmd = &cobra.Command{
 		}
 		defer restore()
 
+		// Subscribe to the per-viewer output subject.
+		outSubject := webterm.OutSubject(vignoble, viewerID)
 		lastMsg := time.Now()
-		sub, err := nc.Conn().Subscribe(outSubject, func(msg *nats.Msg) {
+		outSub, err := nc.Conn().Subscribe(outSubject, func(m *nats.Msg) {
 			lastMsg = time.Now()
-			_, _ = os.Stdout.Write(msg.Data)
+			_, _ = os.Stdout.Write(m.Data)
 		})
 		if err != nil {
 			return fmt.Errorf("subscribe %s: %w", outSubject, err)
 		}
-		defer sub.Unsubscribe() //nolint:errcheck
+		defer outSub.Unsubscribe() //nolint:errcheck
+
+		// Subscribe to session-ended events.
+		evtSub, err := nc.Conn().Subscribe(webterm.EvtSubject(vignoble, viewerID), func(m *nats.Msg) {
+			var evt webterm.EvtMsg
+			if json.Unmarshal(m.Data, &evt) == nil && evt.Type == webterm.EvtEnded {
+				stop()
+			}
+		})
+		if err != nil {
+			return fmt.Errorf("subscribe evt: %w", err)
+		}
+		defer evtSub.Unsubscribe() //nolint:errcheck
+
+		// For steer mode: forward stdin to the responder's input subject.
+		if steer {
+			go func() {
+				inSubject := webterm.InSubject(vignoble, viewerID)
+				buf := make([]byte, 4096)
+				for {
+					n, err := os.Stdin.Read(buf)
+					if n > 0 {
+						_ = nc.Conn().Publish(inSubject, buf[:n])
+					}
+					if err != nil {
+						return
+					}
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+				}
+			}()
+		}
 
 		fmt.Fprintf(os.Stderr, "\r\n\x1b[33m[aoc attach] watching %s (Ctrl+C to detach)\x1b[0m\r\n", sessionName)
 
@@ -122,18 +187,35 @@ var attachCmd = &cobra.Command{
 			idleTick = t.C
 		}
 
+		// Heartbeat so the responder's idle watchdog stays alive.
+		hbTick := time.NewTicker(30 * time.Second)
+		defer hbTick.Stop()
+
+		ctlSubject := webterm.CtlSubject(vignoble, viewerID)
+
 		for {
 			select {
 			case <-ctx.Done():
 				restore()
+				// Send close so the responder tears down immediately.
+				data, _ := json.Marshal(webterm.CtlMsg{Type: webterm.CtlClose})
+				_ = nc.Conn().Publish(ctlSubject, data)
 				fmt.Fprintf(os.Stderr, "\r\n\x1b[33m[aoc attach] detached\x1b[0m\r\n")
 				return nil
-			case <-sigwinch:
-				// No-op: the pump auto-attaches with a large default size.
-				// Resize propagation is a follow-up.
+			case sig := <-sigwinch:
+				_ = sig
+				if w, h, serr := term.GetSize(os.Stdout.Fd()); serr == nil {
+					data, _ := json.Marshal(webterm.CtlMsg{Type: webterm.CtlResize, Cols: w, Rows: h})
+					_ = nc.Conn().Publish(ctlSubject, data)
+				}
+			case <-hbTick.C:
+				data, _ := json.Marshal(webterm.CtlMsg{Type: webterm.CtlHeartbeat})
+				_ = nc.Conn().Publish(ctlSubject, data)
 			case <-idleTick:
 				if timeout > 0 && time.Since(lastMsg) >= timeout {
 					restore()
+					data, _ := json.Marshal(webterm.CtlMsg{Type: webterm.CtlClose})
+					_ = nc.Conn().Publish(ctlSubject, data)
 					fmt.Fprintf(os.Stderr, "\r\n\x1b[33m[aoc attach] idle timeout\x1b[0m\r\n")
 					return nil
 				}
@@ -162,13 +244,9 @@ func resolveAttachTarget(kv *pnats.KV, token string) (sessionName, agentID strin
 	return session.SanitizeName(name), aid
 }
 
-// isLocalSession returns true when the named session exists on the given tmux socket.
-func isLocalSession(socket, name string) bool {
-	return exec.Command("tmux", "-L", socket, "has-session", "-t", name).Run() == nil
-}
-
 func init() {
 	attachCmd.Flags().String("vignoble-name", "", "Vignoble name (NATS namespace); defaults to NATS_VIGNOBLE or the resolved vignoble")
 	attachCmd.Flags().Duration("timeout", 0, "Detach after this much idle time (0 = no timeout)")
+	attachCmd.Flags().Bool("steer", false, "Open in read-write (steer) mode — requires ModeRW grant")
 	rootCmd.AddCommand(attachCmd)
 }

@@ -162,19 +162,20 @@ func TestControlRoomLiveEnumeration(t *testing.T) {
 	}
 }
 
-// TestBuildIndexRemoteAgents: a KV record with a fresh lastSeen and no matching
-// tmux session is surfaced as a remote vendangeur.
+// TestBuildIndexRemoteAgents: a KV record with standalone=true and a fresh lastSeen
+// and no matching tmux session is surfaced as a Remote vendangeur.
 func TestBuildIndexRemoteAgents(t *testing.T) {
 	kv := &fakeKV{
 		bucket: map[string]map[string]map[string]any{
 			"pinard-agents": {
 				"agent-remote-1": {
-					"vignoble": "exohub",
-					"name":     "mypar--genomics-hpc1",
-					"parcelle": "mypar",
-					"tempo":    "active",
-					"step":     "building",
-					"lastSeen": time.Now().UTC().Format(time.RFC3339),
+					"vignoble":   "exohub",
+					"name":       "mypar--genomics-hpc1",
+					"parcelle":   "mypar",
+					"tempo":      "active",
+					"step":       "building",
+					"standalone": true,
+					"lastSeen":   time.Now().UTC().Format(time.RFC3339),
 				},
 			},
 		},
@@ -188,6 +189,9 @@ func TestBuildIndexRemoteAgents(t *testing.T) {
 	if !e.Remote {
 		t.Fatalf("expected Remote=true, got %+v", e)
 	}
+	if e.Unreachable {
+		t.Fatalf("expected Unreachable=false for standalone remote, got %+v", e)
+	}
 	if e.Name != "mypar--genomics-hpc1" {
 		t.Fatalf("unexpected name %q", e.Name)
 	}
@@ -199,6 +203,44 @@ func TestBuildIndexRemoteAgents(t *testing.T) {
 	}
 	if e.Step != "building" {
 		t.Fatalf("unexpected step %q", e.Step)
+	}
+}
+
+// TestBuildIndexLocalUnreachable: a KV record WITHOUT standalone=true and NOT in
+// tmux sessions is surfaced as Unreachable (not Remote) — local agent with down responder.
+func TestBuildIndexLocalUnreachable(t *testing.T) {
+	kv := &fakeKV{
+		bucket: map[string]map[string]map[string]any{
+			"pinard-agents": {
+				"mypar--exo-cli-xyz": {
+					"vignoble": "exohub",
+					"name":     "mypar--exo-cli-xyz",
+					"parcelle": "mypar",
+					"tempo":    "active",
+					"step":     "open-mr",
+					"lastSeen": time.Now().UTC().Format(time.RFC3339),
+					// standalone absent (local worker)
+				},
+			},
+		},
+	}
+	gw := &Gateway{AgentsKV: kv}
+	idx := gw.buildIndex("exohub", ListReply{}) // no tmux sessions (responder down)
+	if len(idx.Vendangeurs) != 1 {
+		t.Fatalf("expected 1 unreachable vendangeur, got %d: %+v", len(idx.Vendangeurs), idx.Vendangeurs)
+	}
+	e := idx.Vendangeurs[0]
+	if e.Remote {
+		t.Fatalf("local agent must not be Remote, got %+v", e)
+	}
+	if !e.Unreachable {
+		t.Fatalf("expected Unreachable=true for local agent with down responder, got %+v", e)
+	}
+	if e.Name != "mypar--exo-cli-xyz" {
+		t.Fatalf("unexpected name %q", e.Name)
+	}
+	if e.Parcelle != "mypar" {
+		t.Fatalf("unexpected parcelle %q", e.Parcelle)
 	}
 }
 
@@ -253,6 +295,9 @@ func TestBuildIndexNoRegression(t *testing.T) {
 	e := idx.Vendangeurs[0]
 	if e.Remote {
 		t.Fatalf("local session must not be marked Remote")
+	}
+	if e.Unreachable {
+		t.Fatalf("local session in tmux list must not be marked Unreachable")
 	}
 	if e.Name != "mypar--exo-cli-abc" {
 		t.Fatalf("unexpected name %q", e.Name)

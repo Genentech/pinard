@@ -236,6 +236,16 @@ var envExportsCmd = &cobra.Command{
 			emit("ENGRAM_URL", fmt.Sprintf("http://127.0.0.1:%d", port))
 		}
 
+		// BYO LLM key (solo mode): pass through ANTHROPIC_API_KEY / OPENAI_API_KEY
+		// when set in the environment (sourced from ~/.config/pinard/env). pi's direct
+		// provider picks these up without any proxy configuration.
+		if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
+			emit("ANTHROPIC_API_KEY", v)
+		}
+		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
+			emit("OPENAI_API_KEY", v)
+		}
+
 		return nil
 	},
 }

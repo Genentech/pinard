@@ -112,15 +112,17 @@ automatically, so lessons are never purely manual. This is the part that runs to
 ### MR knowledge ingestion ✅ {#mr-knowledge-ingestion}
 
 When a merge request is **merged**, the daemon automatically assembles a memory event
-and publishes it to the memory service. The service extracts durable entities — decisions,
-artifacts, and diagnoses — and stores them in SurrealDB with `provenance="mr"`.
+and publishes it to the memory service. The service runs two extraction passes and
+stores durable entities in SurrealDB.
 
-**What's captured:**
+#### Pass 1 — description + issues (provenance `mr`)
+
+The primary pass reads:
 - MR title and description (the *what was realized*)
 - Closing issues title and description (the *intent context*)
 - File paths changed (stored in entity data, not embedded)
 
-**What's extracted:**
+Extracted entity roles:
 - `decision` — a choice made and *why* ("chose X over Y because Z")
 - `artifact` — a durable structural fact the change established
 - `diagnosis` — a root cause paired with its fix (issue: cause → MR: fix)
@@ -128,6 +130,39 @@ artifacts, and diagnoses — and stores them in SurrealDB with `provenance="mr"`
 
 When there is no durable knowledge (trivial mechanical change, uncertain extraction),
 **zero entities are written** — that is a success, not a failure.
+
+#### Pass 2 — review delta (provenance `mr-review`)
+
+After Pass 1, the ingester scans the pre-filtered review discussion for **net-new**
+durable knowledge not already captured in Pass 1 entities. The LLM is given the
+Pass 1 results as context; it only emits an entity when it can justify why that
+entity is not covered and not already expressed. The default is zero entities — noise
+or chatter yields nothing.
+
+Entities extracted here get `provenance="mr-review"` and a slightly lower confidence
+than Pass 1 entities. They appear in recall with the label `[artifact:mr-review ·
+scope]` (or `decision:mr-review` / `diagnosis:mr-review`).
+
+Pass 2 does not re-extract what Pass 1 already found. Its primary value is capturing
+**forward-looking constraints** flagged by reviewers as "worth noting for the future"
+or "not blocking this MR but must hold in a later change" — knowledge that would
+otherwise live only in the review thread.
+
+#### `@memory:` review marker
+
+Instead of waiting for LLM classification, a reviewer can pin a fact directly by
+prefixing a review note with `@memory:` (case-insensitive):
+
+```
+@memory: always split the CA bundle into a per-component secret; sharing one secret across pods causes Vault rate-limit spikes
+```
+
+The daemon intercepts this marker immediately during review forwarding and routes
+the note body straight into the `/lesson` pipeline — no Pass 2 LLM call, no
+ambiguity. The same extraction runs in `aoc mr-memory` replay (see [CLI
+Reference](/docs/cli-reference/#aoc-mr-memory)).
+
+#### Noise filter
 
 **Noise filter:** The daemon skips MRs that are unlikely to contain decisions:
 - `sync Ledger`, `bump-image`, `bump-chart` title prefixes
@@ -142,12 +177,9 @@ Override with labels on the MR:
 | `memory:skip` | Never ingest this MR, regardless of content |
 | `memory:capture` | Always ingest, bypassing all noise filters |
 
-In recall, MR-derived entities carry a distinct `[decision:mr · scope]` label (or
-`[artifact:mr · scope]` / `[diagnosis:mr · scope]`). The hit also exposes `url` and
-`files_changed` when fetched in detail.
-
-Review discussion is **not** ingested in v1 — only the MR description and closing
-issues are used. Review extraction is a planned Phase 2.
+In recall, Pass 1 entities carry a `[decision:mr · scope]` label (or `[artifact:mr
+· scope]` / `[diagnosis:mr · scope]`). Pass 2 review entities carry `[decision:mr-review
+· scope]`. Both expose `url` and `files_changed` when fetched in detail.
 
 ## The self-evolving wiki ✅
 
@@ -186,15 +218,26 @@ service pod.
 Key behaviors:
 
 - **Incremental** — tracks a `wiki_curator_cursor`; only re-synthesizes concepts
-  whose underlying graph entities changed since the last run.
+  whose underlying graph entities changed since the last run. The cursor is **only
+  advanced when synthesis succeeds** — if the chat-LLM is unavailable, the curator
+  does nothing and leaves the cursor in place so those entities are retried on the
+  next cycle.
 - **Full-snapshot curator MRs** — each curator MR is a **complete snapshot** of all
   `auto_serve` wiki pages for the scope, not just the pages synthesized this cycle.
   This prevents a pod restart (which might find only one changed entity) from collapsing
   a large, previously-synthesized wiki into a single-page MR. Stale pages that are no
   longer backed by any live entity are pruned from the branch automatically.
-- **Deduplication** — cosine similarity scan against existing `wiki_doc` embeddings
-  prevents near-duplicate pages (threshold: 0.92); close matches are updated rather
-  than creating a new page.
+- **No-fallback synthesis** — a wiki page is written only when the LLM returns a
+  non-empty title and body. If the LLM is unreachable or returns nothing usable, the
+  entity is retried next cycle. No degraded placeholder pages are ever written.
+- **Scaffold entity guard** — entities whose names are bare mem_save structured-body
+  markers (`What:`, `Why:`, `Where:`, `Learned:`, and similar) are only skipped when
+  their description is also trivial. Real observations starting with `**What**:` but
+  carrying actual content are still curated (the LLM cleans their titles).
+- **Deduplication** — cosine similarity scan using the **synthesized title's
+  embedding** prevents near-duplicate pages; close matches are updated in place rather
+  than creating a new page. Thresholds are role-aware: prose-heavy types (`decision`,
+  `diagnosis`) use 0.88; all others use 0.92.
 - **Human-authored pages are protected** — any page with `source: human` in its
   frontmatter is never overwritten or deleted by the curator.
 - **Reserved files** (`index.md`, `log.md`) are always skipped.
@@ -266,7 +309,7 @@ applies it to the pinard source repo. **The ontology is never mutated automatica
 The gardener runs inside the same memory-service pod as the curator, on a periodic
 schedule driven by the ingester.
 
-## Scope & promotion ✅
+## Scope & promotion ✅ {#scope--promotion}
 
 Knowledge is stored at the **finest grain** (a vigne) and **rolled up** by the
 memory service, which knows vignoble membership from `vignes.yaml`:
@@ -325,9 +368,9 @@ trail.
 
 ## Admin flags
 
-The memory ingester (`services/memory/ingester.py`) exposes two admin flags for
-recovery and maintenance. Both flags cause the ingester to perform the operation
-and exit immediately, without running the normal ingestion loop:
+The memory ingester (`cmd/memory-ingester`) exposes admin flags for recovery and
+maintenance. Each flag causes the ingester to perform the operation and exit
+immediately, without running the normal ingestion loop:
 
 | Flag | Purpose |
 |------|---------|
@@ -336,14 +379,10 @@ and exit immediately, without running the normal ingestion loop:
 | `--rechunk` | Backfill `wiki_chunk` rows for all existing `wiki_doc` pages across every scope, then exit. Idempotent — safe to re-run. Use after a chunking strategy or embedding-model change to rebuild the per-heading chunk index used by semantic recall. |
 
 ```bash
-# Wipe stale wiki pages and reset the curator cursor (next run regenerates cleanly):
-python -m services.memory.ingester --recurate
-
-# Re-ingest all observations and re-derive entity types:
-python -m services.memory.ingester --reingest
-
-# Rebuild per-heading wiki chunk embeddings across all scopes:
-python -m services.memory.ingester --rechunk
+# In the memory-ingester pod (exec in or via kubectl run):
+memory-ingester --recurate    # wipe stale wiki pages; curator regenerates cleanly
+memory-ingester --reingest    # re-ingest all observations and re-derive entity types
+memory-ingester --rechunk     # rebuild per-heading wiki chunk embeddings
 ```
 
 > **Note:** `--recurate` deletes **all auto-generated wiki_doc rows** across all

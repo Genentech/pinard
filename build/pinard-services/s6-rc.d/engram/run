@@ -1,0 +1,5 @@
+#!/bin/sh
+export ENGRAM_PORT="${ENGRAM_PORT:-7437}"
+export ENGRAM_DATA_DIR="${ENGRAM_DATA_DIR:-/data/engram}"
+mkdir -p "${ENGRAM_DATA_DIR}"
+exec engram serve --port "${ENGRAM_PORT}"

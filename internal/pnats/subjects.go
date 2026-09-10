@@ -96,6 +96,23 @@ func BootRecallSubject(vignoble string) string {
 	return fmt.Sprintf("pinard.%s.recall.boot", vignoble)
 }
 
+// MemoryStatusSubject builds the request-reply subject for unified memory health.
+// Lives outside pinard.*.memory.> so the pinard-memory stream never captures it
+// and JetStream PubAcks cannot corrupt nc.request() calls.
+func MemoryStatusSubject(vignoble string) string {
+	return fmt.Sprintf("pinard.%s.memory-status", vignoble)
+}
+
+// MaitreReportSubject builds the subject a maître publishes its status report to.
+// The régisseur subscribes here for live updates; the KV snapshot (KVNameMaitreStatus)
+// serves late-joining régisseurs.
+func MaitreReportSubject(vignoble, parcelle string) string {
+	return fmt.Sprintf("pinard.%s.maitre.%s.report", vignoble, parcelle)
+}
+
+// KVNameMaitreStatus is the KV bucket that holds per-parcelle maître status snapshots.
+// Key format: "<vignoble>.<parcelle>", value: JSON { report, timestamp, parcelle, vignoble }.
+const KVNameMaitreStatus = "pinard-maitre-status"
 // ParseAgentSubject extracts (parcelle, agentID, eventType) from an agent-events
 // subject. It is token-based (locates the `parcelles`/`agents`/`events` markers)
 // so it is robust to optional `.process.<proc>` segments. eventType is the
