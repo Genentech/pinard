@@ -8,7 +8,7 @@ title: Pinard
   <ul class="nav-links">
     <li><a href="#the-estate">The Estate</a></li>
     <li><a href="#features">The Cellar</a></li>
-    <li><a href="/docs/">The Craft</a></li>
+    <li><a href="docs/">The Craft</a></li>
   </ul>
   <a class="nav-cta" href="https://github.com/Genentech/pinard">GitHub →</a>
 </nav>
@@ -57,7 +57,7 @@ title: Pinard
 
   <article class="chapter" id="vignoble">
     <div class="chapter-photo">
-      <img src="/images/photos/chapter-vignoble.jpg" alt="A wine estate divided into distinct vineyard parcels around one central manor" loading="lazy">
+      <img src="images/photos/chapter-vignoble.jpg" alt="A wine estate divided into distinct vineyard parcels around one central manor" loading="lazy">
       <div class="chapter-photo-overlay"></div>
     </div>
     <div class="chapter-body reveal">
@@ -79,7 +79,7 @@ title: Pinard
 
   <article class="chapter">
     <div class="chapter-photo">
-      <img src="/images/photos/chapter-cuvee.jpg" alt="Several source barrels feeding one central blending cask" loading="lazy">
+      <img src="images/photos/chapter-cuvee.jpg" alt="Several source barrels feeding one central blending cask" loading="lazy">
       <div class="chapter-photo-overlay"></div>
     </div>
     <div class="chapter-body reveal">
@@ -100,7 +100,7 @@ title: Pinard
 
   <article class="chapter">
     <div class="chapter-photo">
-      <img src="/images/photos/chapter-recolte.jpg" alt="A final bottle being placed into a completed harvest crate" loading="lazy">
+      <img src="images/photos/chapter-recolte.jpg" alt="A final bottle being placed into a completed harvest crate" loading="lazy">
       <div class="chapter-photo-overlay"></div>
     </div>
     <div class="chapter-body reveal">
@@ -121,7 +121,7 @@ title: Pinard
 
   <article class="chapter">
     <div class="chapter-photo">
-      <img src="/images/photos/chapter-terroir.jpg" alt="Vine cuttings growing in distinct soil samples beside a field notebook" loading="lazy">
+      <img src="images/photos/chapter-terroir.jpg" alt="Vine cuttings growing in distinct soil samples beside a field notebook" loading="lazy">
       <div class="chapter-photo-overlay"></div>
     </div>
     <div class="chapter-body reveal">
@@ -341,7 +341,7 @@ title: Pinard
   <div class="footer-logo">Pin<span>ard</span></div>
   <ul class="footer-links">
     <li><a href="https://github.com/Genentech/pinard">GitHub</a></li>
-    <li><a href="/docs/">The Craft</a></li>
+    <li><a href="docs/">The Craft</a></li>
     <li><a href="https://github.com/Genentech/pinard/blob/main/PINARD.md">PINARD.md</a></li>
   </ul>
   <p class="footer-credit">

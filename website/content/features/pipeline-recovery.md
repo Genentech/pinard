@@ -79,7 +79,7 @@ routed to the worker, but they do not use this five-attempt counter.
 
 The full issue-to-merge lifecycle, including review forwarding, optional auto-merge,
 post-merge monitoring, and deterministic cleanup, is documented in
-[The SWE Process](/docs/swe-process/).
+[The SWE Process](docs/swe-process/).
 
 ## Recover, then continue
 

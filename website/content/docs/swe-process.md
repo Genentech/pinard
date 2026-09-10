@@ -5,14 +5,14 @@ group: Applications
 ---
 
 The SWE process is Pinard's **reference loop** — a
-[semi-deterministic loop](/docs/semi-deterministic-loop/) that turns a GitLab issue
+[semi-deterministic loop](docs/semi-deterministic-loop/) that turns a GitLab issue
 into a merged merge request: *issue → change → MR → review → merge → reap*. It is a
 complete, batteries-included application built on the engine — and a template for
 loops of your own.
 
 > This is **one process**, not the whole of Pinard. If your fleet does something
 > other than code review, you write a different [babysitter
-> process](/docs/authoring-processes/); everything below is how this particular loop
+> process](docs/authoring-processes/); everything below is how this particular loop
 > is wired.
 
 ## Setup — the Pinard GitLab account
@@ -99,7 +99,7 @@ its own spawns without requiring a separate approval comment.
 | `blocked` | Skipped — no vendangeur spawned |
 | `pinard:discarded` | Skipped; if already spawned, its state resets so it can retry |
 | `pinard:awaiting-approval` | Held — owner hasn't approved yet; watcher re-checks each cycle. **Removed automatically** when the owner approves. |
-| `capsule:awaiting-funding` | Capsule-gated — contract detected but not yet funded; see [Buddy Capsules](/docs/capsules/) |
+| `capsule:awaiting-funding` | Capsule-gated — contract detected but not yet funded; see [Buddy Capsules](docs/capsules/) |
 
 **Retry:** add `pinard:discarded`, then remove it and re-assign — the watcher picks
 it up next cycle.
@@ -108,17 +108,17 @@ it up next cycle.
 
 | Label | Effect |
 |-------|--------|
-| `parcelle:<name>` | Route into a [parcelle](/docs/orchestration/) (else the vigne's own bucket) |
+| `parcelle:<name>` | Route into a [parcelle](docs/orchestration/) (else the vigne's own bucket) |
 | `target:<branch>` | Target a branch, e.g. `target:cuvee/data-service` (may contain `/`) |
 
 A parcelle can also claim an issue via its `parcelle.yaml`, which may set a
-`target_branch:` (the [cuvée](/docs/orchestration/) strategy) without any label.
+`target_branch:` (the [cuvée](docs/orchestration/) strategy) without any label.
 
 ## The loop — issue to MR
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="/images/docs/swe-process-lifecycle.jpg" alt="A sketched software-work lifecycle from an approved request through an isolated worker and merge-request watcher, with review and failure loops, to merge and worker cleanup.">
+    <img src="images/docs/swe-process-lifecycle.jpg" alt="A sketched software-work lifecycle from an approved request through an isolated worker and merge-request watcher, with review and failure loops, to merge and worker cleanup.">
     <span class="doc-figure-label mustard" style="--x: 13%; --y: 38%;">Owner gate</span>
     <span class="doc-figure-label charcoal" style="--x: 16%; --y: 57%;">Vendangeur</span>
     <span class="doc-figure-label mustard" style="--x: 38%; --y: 41%;">MR handoff</span>
@@ -174,7 +174,7 @@ dispatched straight to the worker's inbox — including the exact
 ### Auto-merge (optional)
 
 **Off by default — a human merges.** When enabled via `auto_merge: true` in
-[`vignes.yaml`](/docs/configuration/) (per-vigne or global), the watcher merges once
+[`vignes.yaml`](docs/configuration/) (per-vigne or global), the watcher merges once
 **all** hold: pipeline **success**, at least one **approval**, **no unresolved
 threads**, and **not a Draft**. If unapproved, a `needs_approval` event goes to the
 conductor. With auto-merge off, none of this runs.
@@ -187,7 +187,7 @@ point that kills the tmux session and cleans up the worktree.
 
 ## See also
 
-- **[Authoring Processes](/docs/authoring-processes/)** — write your own loop.
-- **[Orchestration & Parcelles](/docs/orchestration/)** — group SWE work into workstreams.
-- **[Configuration](/docs/configuration/)** — `auto_merge` and other toggles.
-- **[Buddy Capsules](/docs/capsules/)** — let a colleague fund a vendangeur's quota.
+- **[Authoring Processes](docs/authoring-processes/)** — write your own loop.
+- **[Orchestration & Parcelles](docs/orchestration/)** — group SWE work into workstreams.
+- **[Configuration](docs/configuration/)** — `auto_merge` and other toggles.
+- **[Buddy Capsules](docs/capsules/)** — let a colleague fund a vendangeur's quota.

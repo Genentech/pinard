@@ -13,7 +13,7 @@ Pinard reads two kinds of config: **machine-level secrets** in `~/.config/pinard
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="/images/docs/configuration-flow-v3.jpg" alt="A two-panel configuration diagram. The machine-scope panel has three direct, non-crossing lanes from credentials to the daemon, conductor, and vendangeur. The vignoble-scope panel repeats those three direct lanes from vignoble files to every role.">
+    <img src="images/docs/configuration-flow-v3.jpg" alt="A two-panel configuration diagram. The machine-scope panel has three direct, non-crossing lanes from credentials to the daemon, conductor, and vendangeur. The vignoble-scope panel repeats those three direct lanes from vignoble files to every role.">
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 25%; --y: 7%;">H · Machine scope</span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 75%; --y: 7%;">V · Vignoble config → every role</span>
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 35%; --y: 37%;">Daemon · services & identity</span>
@@ -58,7 +58,7 @@ token (PAT). It is separate from the bot token (`token_env`) and is used in two 
 
 1. **Owner gate** — when the conductor's `spawn_agent` tool assigns an issue, it uses the
    owner token so the assignment note is authored by *you* (not the bot), which Pinard
-   then recognises as owner approval. See [The SWE Process — Owner Gate](/docs/swe-process/#owner-gate-security).
+   then recognises as owner approval. See [The SWE Process — Owner Gate](docs/swe-process/#owner-gate-security).
 2. **`aoc env-exports --role conductor`** — the owner token is emitted **only** for the
    conductor role and is never passed to vendangeur workers, preventing PAT leakage to
    LLM-driven processes.
@@ -73,11 +73,11 @@ detached daemon sources on start.
 > config — you directed the work) but committed by the *service account*
 > (`GIT_COMMITTER_*` from `credentials.yaml` — it pushed).
 
-The optional `webterm:` block configures the [Web Terminal](/docs/web-terminal/).
+The optional `webterm:` block configures the [Web Terminal](docs/web-terminal/).
 
 ### Buddy Capsule (optional)
 
-The [Buddy Capsule protocol](/docs/capsules/) is gated behind a build tag and requires
+The [Buddy Capsule protocol](docs/capsules/) is gated behind a build tag and requires
 an external Mnemosyne service. If your `aoc` binary was built with `-tags capsule`, set
 the Mnemosyne base URL in `~/.config/pinard/env` (sourced by the daemon at start):
 
@@ -224,7 +224,7 @@ hot-reloads on change.
 ## `schedules.yaml`
 
 Cron-based agent spawns. Managed with `aoc add schedule` / `aoc unschedule`, or edited
-directly. See [Scheduling](/docs/scheduling/).
+directly. See [Scheduling](docs/scheduling/).
 
 ```yaml
 schedules:
