@@ -19,7 +19,7 @@ a step, to do the one bounded thing that genuinely needs judgment:
 
 <figure class="doc-figure doc-figure--wide">
   <div class="doc-figure-visual">
-    <img src="images/docs/semi-deterministic-loop.jpg" alt="One six-stage execution track interrupted after stage three, with the first three journal cells completed and an arrow from the open fourth cell back to stage four.">
+    <img src="/images/docs/semi-deterministic-loop.jpg" alt="One six-stage execution track interrupted after stage three, with the first three journal cells completed and an arrow from the open fourth cell back to stage four.">
     <span class="doc-figure-label mustard" style="--x: 9%; --y: 8%;">1 · Code step</span>
     <span class="doc-figure-label terracotta" style="--x: 25%; --y: 8%;">2 · LLM turn</span>
     <span class="doc-figure-label mustard" style="--x: 40%; --y: 8%;">3 · Code step</span>
@@ -57,7 +57,7 @@ The babysitter:
 
 A process lives with the code it operates on — baked into a repo at
 `pinard/<process>/process.js` — so the loop is versioned alongside the thing it
-automates. See [Authoring Processes](docs/authoring-processes/) to write one.
+automates. See [Authoring Processes](/docs/authoring-processes/) to write one.
 
 ## Runs, journals, and resume
 
@@ -97,10 +97,10 @@ A loop is executed by a **vendangeur** (worker) — usually spawned by the daemo
 its own git worktree, but it can also run **standalone** on remote hardware (an
 HPC node, a SLURM job) with no daemon at all. Either way it talks to the vignoble
 over NATS and resumes from its journal. See
-[Distributed & Remote Execution](docs/remote-workers/).
+[Distributed & Remote Execution](/docs/remote-workers/).
 
 ## Next
 
-- **[Authoring Processes](docs/authoring-processes/)** — write your own loop.
-- **[Architecture](docs/architecture/)** — how the babysitter fits the engine.
-- **[The SWE Process](docs/swe-process/)** — the reference loop, end to end.
+- **[Authoring Processes](/docs/authoring-processes/)** — write your own loop.
+- **[Architecture](/docs/architecture/)** — how the babysitter fits the engine.
+- **[The SWE Process](/docs/swe-process/)** — the reference loop, end to end.

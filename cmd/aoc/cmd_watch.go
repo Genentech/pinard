@@ -7,6 +7,7 @@ import (
 	"github.com/Genentech/pinard/internal/config"
 	"github.com/Genentech/pinard/internal/gitlab"
 	"github.com/Genentech/pinard/internal/pnats"
+	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/Genentech/pinard/internal/session"
 	"github.com/Genentech/pinard/internal/state"
 	"github.com/Genentech/pinard/internal/watcher"
@@ -19,6 +20,13 @@ var watchMRsCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		creds, vb, gl, nc := mustLoadAll()
 		defer nc.Close()
+
+		pCfg := vb.ResolvePressoirConfig("")
+		pr, err := pressoir.NewPressoir(pCfg, creds)
+		if err != nil {
+			log.Printf("pressoir init failed: %v — falling back to GitLab adapter", err)
+			pr = pressoir.NewGitLabAdapter(creds.GitLab.Host, creds.Token())
+		}
 
 		kv := pnats.NewKV(nc)
 		mrState, err := state.Load[state.MRWatcherState](filepath.Join(vb.StateDir, "mr-watcher.yaml"))
@@ -33,6 +41,7 @@ var watchMRsCmd = &cobra.Command{
 			State:          mrState,
 			NATS:           nc,
 			KV:             kv,
+			Pressoir:       pr,
 			GitLab:         gl,
 			Vignoble:       vb,
 			IgnoredAuthors: map[string]bool{creds.GitLab.User: true},
@@ -49,6 +58,13 @@ var watchIssuesCmd = &cobra.Command{
 		creds, vb, gl, nc := mustLoadAll()
 		defer nc.Close()
 
+		pCfg := vb.ResolvePressoirConfig("")
+		pr, prErr := pressoir.NewPressoir(pCfg, creds)
+		if prErr != nil {
+			log.Printf("pressoir init failed: %v — falling back to GitLab adapter", prErr)
+			pr = pressoir.NewGitLabAdapter(creds.GitLab.Host, creds.Token())
+		}
+
 		issueState, err := state.Load[state.IssueWatcherState](filepath.Join(vb.StateDir, "issue-watcher.yaml"))
 		if err != nil {
 			return err
@@ -57,8 +73,10 @@ var watchIssuesCmd = &cobra.Command{
 		w := &watcher.IssueWatcher{
 			State:    issueState,
 			NATS:     nc,
+			Pressoir: pr,
 			GitLab:   gl,
 			Vignoble: vb,
+			Creds:    creds,
 			User:     creds.GitLab.User,
 		}
 		return w.Run()

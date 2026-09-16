@@ -1,5 +1,9 @@
 # GitLab Setup for Pinard
 
+> **Using GitHub instead?** See [`docs/github-setup.md`](github-setup.md) for the GitHub
+> equivalent, including fine-grained PAT permissions, HTTPS push auth, and the
+> single-PAT self-approval caveat.
+
 ## Create the `pinard` user
 
 1. Create a GitLab account named `pinard` (or ask your admin to create a service account)

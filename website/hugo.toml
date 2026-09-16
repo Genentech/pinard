@@ -1,6 +1,11 @@
 baseURL = "/"
 title = "Pinard"
 
+# canonifyURLs rewrites root-relative asset/link paths against the build
+# baseURL, so the same source works at root (internal) and at the /pinard/
+# project-pages subpath, while keeping the offline htmltest check resolvable.
+canonifyURLs = true
+
 languageCode = "en-US"
 enableEmoji = true
 

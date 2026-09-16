@@ -14,7 +14,7 @@ One vignoble = one **régisseur** + N **maîtres** (one per active parcelle) + M
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/orchestration-parcelles.jpg" alt="A vineyard divided into three plots, each with one foreman and several harvest workers, overseen by an estate manager; three harvest streams blend into one output below.">
+    <img src="/images/docs/orchestration-parcelles.jpg" alt="A vineyard divided into three plots, each with one foreman and several harvest workers, overseen by an estate manager; three harvest streams blend into one output below.">
     <span class="doc-figure-label charcoal" style="--x: 50%; --y: 7%;">Vignoble</span>
     <span class="doc-figure-label mustard" style="--x: 14%; --y: 28%;">Parcelle</span>
     <span class="doc-figure-label mustard" style="--x: 20%; --y: 42%;">Maître</span>
@@ -56,7 +56,7 @@ the autonomous event stream.
 
 Cross-session recall is provided by **Engram** (the `mem_*` tools) — both the régisseur
 and each maître can read and write persistent memory that survives individual sessions.
-See [Memory & Recall](docs/memory/) for details.
+See [Memory & Recall](/docs/memory/) for details.
 
 - **Attach** with `aoc maitre attach --parcelle <name>` (spawns the window if missing,
   then switches to it), the `/parcelle <name>` command, or the `attach_parcelle` tool.
@@ -98,6 +98,12 @@ current focus:
 Use named-parcelle mode when you need a fresh, LLM-authored assessment from a specific
 workstream; use board mode for a quick vignoble-wide overview.
 
+**`get_notifications`** (régisseur + maître) — reads the most recent entries from the
+vignoble's notification log. If the newest entry is older than **4 hours**, it appends a
+`⚠️ newest notification is Xh old — sink may be stale` hint so you know to check
+whether the daemon or a vendangeur has gone quiet. The `/notifications` slash command is
+a shorthand for the same data.
+
 **Operator relay** — the régisseur has built-in guidance for relaying operator
 messages to specific maîtres:
 1. Use `get_maitre_status` (board mode or named-parcelle) to identify active parcelles
@@ -118,7 +124,7 @@ messages to specific maîtres:
 
 ### Vendangeur (worker)
 
-The harvester — see [Overview](docs/overview/) for the naming. Each vendangeur takes one
+The harvester — see [Overview](/docs/overview/) for the naming. Each vendangeur takes one
 task in its own git worktree, opens an MR, and is reaped when it merges.
 
 ## Parcelles

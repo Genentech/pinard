@@ -239,6 +239,118 @@ func TestWorkersPanel_kvErrorMsg(t *testing.T) {
 	}
 }
 
+// ── kvEntryMsg (single-entry live update) ────────────────────────────────────
+
+// TestWorkersPanel_kvEntryMsg_put verifies that a put entry is applied to the
+// worker list and the panel schedules the next waitForKVEntry.
+func TestWorkersPanel_kvEntryMsg_put(t *testing.T) {
+	p := NewWorkersPanel("prod", nil)
+	// Seed kvCh so waitForKVEntry has something to return.
+	p.kvCh = make(chan nats.KeyValueEntry, 4)
+
+	entry := &fakeKVEntry{
+		key:   "exo-swe-1",
+		value: []byte(`{"project":"exo","tempo":"active","step":"impl","vignoble":"prod"}`),
+		op:    nats.KeyValuePut,
+	}
+	updated, cmd := p.Update(kvEntryMsg{entry: entry})
+	wp := updated.(*WorkersPanel)
+
+	if len(wp.workers) != 1 {
+		t.Fatalf("expected 1 worker after kvEntryMsg put, got %d", len(wp.workers))
+	}
+	if wp.workers[0].Key != "exo-swe-1" {
+		t.Errorf("worker key = %q, want exo-swe-1", wp.workers[0].Key)
+	}
+	if cmd == nil {
+		t.Error("Update should return a cmd (waitForKVEntry) after kvEntryMsg")
+	}
+}
+
+// TestWorkersPanel_kvEntryMsg_delete verifies that a delete entry removes the
+// worker and that a waitForKVEntry cmd is still returned.
+func TestWorkersPanel_kvEntryMsg_delete(t *testing.T) {
+	p := NewWorkersPanel("prod", nil)
+	p.kvCh = make(chan nats.KeyValueEntry, 4)
+	p.workers = []WorkerEntry{
+		{Key: "exo-swe-1", Project: "exo", Tempo: "active"},
+		{Key: "exo-swe-2", Project: "exo", Tempo: "active"},
+	}
+
+	delEntry := &fakeKVEntry{key: "exo-swe-1", value: nil, op: nats.KeyValueDelete}
+	updated, cmd := p.Update(kvEntryMsg{entry: delEntry})
+	wp := updated.(*WorkersPanel)
+
+	if len(wp.workers) != 1 {
+		t.Fatalf("expected 1 worker after delete, got %d", len(wp.workers))
+	}
+	if wp.workers[0].Key != "exo-swe-2" {
+		t.Errorf("remaining worker key = %q, want exo-swe-2", wp.workers[0].Key)
+	}
+	if cmd == nil {
+		t.Error("Update should return a cmd after kvEntryMsg delete")
+	}
+}
+
+// TestWorkersPanel_kvEntryMsg_nilSentinel verifies that a nil entry (snapshot
+// end) triggers a table rebuild without crashing.
+func TestWorkersPanel_kvEntryMsg_nilSentinel(t *testing.T) {
+	p := NewWorkersPanel("prod", nil)
+	p.kvCh = make(chan nats.KeyValueEntry, 4)
+	p.workers = []WorkerEntry{
+		{Key: "exo-swe-1", Project: "exo", Tempo: "active"},
+	}
+
+	updated, cmd := p.Update(kvEntryMsg{entry: nil})
+	wp := updated.(*WorkersPanel)
+
+	// Workers are preserved; table is rebuilt.
+	if len(wp.workers) != 1 {
+		t.Errorf("nil sentinel should not remove workers, got %d", len(wp.workers))
+	}
+	if cmd == nil {
+		t.Error("Update should return waitForKVEntry after nil sentinel")
+	}
+}
+
+// TestWorkersPanel_kvEntryMsg_vignobleFilter verifies that entries from a
+// different vignoble are ignored.
+func TestWorkersPanel_kvEntryMsg_vignobleFilter(t *testing.T) {
+	p := NewWorkersPanel("prod", nil)
+	p.kvCh = make(chan nats.KeyValueEntry, 4)
+
+	entry := &fakeKVEntry{
+		key:   "exo-swe-1",
+		value: []byte(`{"project":"exo","tempo":"active","vignoble":"staging"}`),
+		op:    nats.KeyValuePut,
+	}
+	updated, _ := p.Update(kvEntryMsg{entry: entry})
+	wp := updated.(*WorkersPanel)
+
+	if len(wp.workers) != 0 {
+		t.Errorf("entry from different vignoble should be filtered out, got %d workers", len(wp.workers))
+	}
+}
+
+// TestWorkersPanel_singleWatcher verifies that repeated Init() calls do not
+// start a second goroutine (kvCh is only created once).
+func TestWorkersPanel_singleWatcher(t *testing.T) {
+	p := NewWorkersPanel("prod", nil)
+	// Simulate a pre-existing channel (as if Init was already called).
+	ch := make(chan nats.KeyValueEntry, 4)
+	p.kvCh = ch
+
+	// With nil kv, Init returns nil — the guard also fires for non-nil kv when
+	// kvCh is already set.
+	cmd := p.Init()
+	if cmd != nil {
+		t.Error("Init with existing kvCh should return nil (no second goroutine)")
+	}
+	if p.kvCh != ch {
+		t.Error("Init should not replace existing kvCh")
+	}
+}
+
 // ── KV parsing ────────────────────────────────────────────────────────────────
 
 func TestParseKVEntry_validJSON(t *testing.T) {

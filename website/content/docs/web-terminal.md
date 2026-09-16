@@ -16,7 +16,7 @@ Terminal bytes are ephemeral, so they travel over **core NATS, never JetStream**
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/web-terminal-topology.jpg" alt="A five-stage web-terminal path from browser through gateway and NATS to a remote responder and terminal, with no direct inbound shortcut to the host.">
+    <img src="/images/docs/web-terminal-topology.jpg" alt="A five-stage web-terminal path from browser through gateway and NATS to a remote responder and terminal, with no direct inbound shortcut to the host.">
     <span class="doc-figure-label charcoal" style="--x: 10%; --y: 10.5%;">Browser</span>
     <span class="doc-figure-label mustard" style="--x: 31%; --y: 10.5%;">Gateway</span>
     <span class="doc-figure-label mustard" style="--x: 51%; --y: 10.5%;">Core NATS</span>

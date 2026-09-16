@@ -9,7 +9,7 @@ session, and every reaped worker throws away hard-won operational knowledge —
 failure patterns, recovery recipes, threshold decisions — and a human re-teaches
 the same lessons on every run. **Memory is how a Pinard fleet learns and improves
 over time**, and it is the third pillar alongside the
-[semi-deterministic loop](docs/semi-deterministic-loop/) and the agents themselves.
+[semi-deterministic loop](/docs/semi-deterministic-loop/) and the agents themselves.
 
 Pinard's memory is **local-first, curated, and portable**:
 
@@ -18,18 +18,18 @@ Pinard's memory is **local-first, curated, and portable**:
 - **curated** — signal over noise: agents write *distilled* observations (decisions,
   bugfixes, discoveries), not raw transcripts;
 - **portable** — memory can be versioned and shipped *with* an agent (see the
-  [layered architecture](docs/memory-architecture/)).
+  [layered architecture](/docs/memory-architecture/)).
 
 > **What runs today vs. what's designed.** This page covers the **shipped**
 > memory system (engram + wiki bundle). The richer, layered architecture that builds
 > on it — SurrealDB, semantic recall, a knowledge graph, ontologies, the self-curating
-> wiki — is documented in [The Layered Memory Architecture](docs/memory-architecture/)
+> wiki — is documented in [The Layered Memory Architecture](/docs/memory-architecture/)
 > and the pages that follow, each marked with its status (✅ shipped · 🔭 designed ·
 > 🧪 spike). The wiki curator and ontology gardener are ✅ shipped as of v0.18.
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/memory-knowledge-cycle.jpg" alt="A sketched clockwise knowledge cycle in which agents distill observations into a local archive, curate selected knowledge, inject a compact index at spawn, fetch exact details when needed, and improve later work while raw transcripts fade away.">
+    <img src="/images/docs/memory-knowledge-cycle.jpg" alt="A sketched clockwise knowledge cycle in which agents distill observations into a local archive, curate selected knowledge, inject a compact index at spawn, fetch exact details when needed, and improve later work while raw transcripts fade away.">
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 28%; --y: 7%;">1 · Observe</span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 69%; --y: 7%;">2 · Distill</span>
     <span class="doc-figure-label mustard" style="--x: 79%; --y: 82%;">3 · Store & curate</span>
@@ -64,7 +64,7 @@ The memory layer is implemented as three Go binaries, deployed together inside t
 
 All three are Go binaries with no Python runtime dependency. They ship natively for
 Linux (inside `pinard-services`) and build for any platform where Go is available.
-See [The Layered Memory Architecture](docs/memory-architecture/) for the full
+See [The Layered Memory Architecture](/docs/memory-architecture/) for the full
 SurrealDB schema and layer semantics.
 
 ### The wiki bundle
@@ -82,7 +82,7 @@ vignoble-<name>/
 ```
 
 The scaffold is committed to the vignoble repo automatically. Subsequent content
-comes from the [wiki curator](docs/memory-curation/#the-self-evolving-wiki-) running
+comes from the [wiki curator](/docs/memory-curation/#the-self-evolving-wiki-) running
 in the memory service pod, not from the daemon directly.
 
 ### The engram write path
@@ -179,7 +179,7 @@ current session immediately, and surfaces in the boot manifest for future agents
 canonical URLs. Entity ids appear in `/recall` hit labels and can be copied directly
 into `--edit --entity=` or `--replace --entity=` flags.
 
-See [Teaching & Curation](docs/memory-curation/) for the full teaching
+See [Teaching & Curation](/docs/memory-curation/) for the full teaching
 menu including `/teaching` mode.
 
 ### Reading memory (agents)
@@ -203,7 +203,7 @@ Every hit returned by `recall` (and by `/recall`) carries a consistent label:
 | `[lesson · <scope>]` | Pinned lesson entity |
 | `[teaching · <scope>]` | Entity extracted from a teaching episode |
 | `[entity:<role> · <scope>]` | Typed entity (role = `artifact`, `gotcha`, etc.) from SurrealDB scope `<scope>` |
-| `[decision:mr · <scope>]` | Decision/artifact/diagnosis entity extracted from an MR description + closing issues (Pass 1). See [MR knowledge ingestion](docs/memory-curation/#mr-knowledge-ingestion). |
+| `[decision:mr · <scope>]` | Decision/artifact/diagnosis entity extracted from an MR description + closing issues (Pass 1). See [MR knowledge ingestion](/docs/memory-curation/#mr-knowledge-ingestion). |
 | `[decision:mr-review · <scope>]` | Net-new entity extracted from the MR's review notes (Pass 2); `artifact:mr-review` and `diagnosis:mr-review` also exist. |
 | `[engram:<type> · <engram-scope>]` | Engram observation of type `<type>`; `<engram-scope>` is Engram's own `project` or `personal` |
 
@@ -251,7 +251,7 @@ scope flag.
 
 Supporting tools cover housekeeping and analysis: `mem_timeline`, `mem_get_observation`,
 `mem_stats`, `mem_doctor`, and the relation-judgment tools `mem_judge` / `mem_compare`
-(used by the promotion engine described in [Scope & Promotion](docs/memory-curation/)).
+(used by the promotion engine described in [Scope & Promotion](/docs/memory-curation/)).
 
 ## Boot injection at spawn
 
@@ -291,12 +291,12 @@ Boot injection is **fail-open** — if the memory service is unavailable or time
 - Check health with the **🧠 status-line indicator**, the engram section of
   `aoc status`, **`mem_doctor`**, and **`aoc memory-status`** — the latter gives a
   unified three-section view of Engram replication, SurrealDB ingestion, and wiki
-  curation health (see [CLI Reference](docs/cli-reference/#aoc-memory-status)).
+  curation health (see [CLI Reference](/docs/cli-reference/#aoc-memory-status)).
 - Cloud sync is **best-effort** — if replication is down, the local store is still
   the source of truth and agents keep working.
 
 ## Next
 
-- **[The Layered Memory Architecture](docs/memory-architecture/)** — the full vision.
-- **[The Ontology](docs/memory-ontology/)** — how knowledge is typed and made portable.
-- **[Teaching & Curation](docs/memory-curation/)** — `/lesson`, `/teaching`, the wiki, and promotion.
+- **[The Layered Memory Architecture](/docs/memory-architecture/)** — the full vision.
+- **[The Ontology](/docs/memory-ontology/)** — how knowledge is typed and made portable.
+- **[Teaching & Curation](/docs/memory-curation/)** — `/lesson`, `/teaching`, the wiki, and promotion.

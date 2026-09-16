@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/Genentech/pinard/internal/config"
 	"github.com/Genentech/pinard/internal/gitlab"
 	"github.com/Genentech/pinard/internal/pnats"
+	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/Genentech/pinard/internal/state"
 )
 
@@ -31,14 +33,45 @@ func extractContractID(description string) string {
 }
 
 type IssueWatcher struct {
-	State         *state.Store[state.IssueWatcherState]
-	NATS          *pnats.Client
-	KV            pnats.KVWriter
-	GitLab        *gitlab.Client
-	Vignoble      *config.Vignoble
-	User          string // GitLab username to watch assignments for (bot user)
-	Owner         string // Tenant owner GitLab username (trust anchor for spawn gate)
+	State    *state.Store[state.IssueWatcherState]
+	NATS     *pnats.Client
+	KV       pnats.KVWriter
+	// Pressoir is the vignoble-default provider-neutral adapter (fallback when
+	// Resolver is nil or per-repo resolution fails).
+	Pressoir pressoir.Pressoir
+	// Resolver resolves the correct pressoir adapter per repo so that a vigne
+	// configured with pressoir: github is not polled via the GitLab adapter.
+	Resolver *PressoirResolver
+	// GitLab is retained for ListIssueNotes (needs gitlab.Note.System/Author/ID
+	// fields not yet in the neutral pressoir.Comment model), and for the glab
+	// reply-command hint Host field.
+	GitLab   *gitlab.Client
+	Vignoble *config.Vignoble
+	Creds    *config.Credentials
+	User     string // GitLab username to watch assignments for (bot user)
+	Owner    string // Tenant owner GitLab username (trust anchor for spawn gate)
 	CapsulePoller *CapsulePoller
+}
+
+// pressoirFor returns the pressoir adapter for the given repo path.
+func (w *IssueWatcher) pressoirFor(repo string) pressoir.Pressoir {
+	if w.Resolver != nil {
+		return w.Resolver.For(repo)
+	}
+	return w.Pressoir
+}
+
+// userForRepo returns the bot username appropriate for the given repo's pressoir
+// provider. GitHub vignes use creds.GitHub.User; all others use creds.GitLab.User
+// (the historical default). Falls back to w.User when Creds is nil.
+func (w *IssueWatcher) userForRepo(repo string) string {
+	if w.Creds != nil && w.Vignoble != nil {
+		if w.Vignoble.ResolvePressoirConfig(repo).Provider() == "github" {
+			return w.Creds.GitHub.User
+		}
+		return w.Creds.GitLab.User
+	}
+	return w.User
 }
 
 func (w *IssueWatcher) Run() error {
@@ -50,7 +83,7 @@ func (w *IssueWatcher) Run() error {
 			continue
 		}
 
-		issues, err := w.GitLab.ListIssues(vigne.Repo, w.User)
+		issues, err := w.listIssues(vigne.Repo, w.userForRepo(vigne.Repo))
 		if err != nil {
 			log.Printf("[issue-watcher] Error fetching issues for %s: %v", vigneName, err)
 			continue
@@ -100,7 +133,7 @@ func (w *IssueWatcher) Run() error {
 					w.State.Update(func(s *state.IssueWatcherState) {
 						s.Seen[vigneName][fmt.Sprintf("%d", issue.IID)].Status = "seen"
 					})
-					w.GitLab.PostIssueNote(vigne.Repo, issue.IID, "pinard: discarded — reset to retry on next cycle (remove `pinard:discarded` label to re-spawn)")
+					w.postIssueNote(vigne.Repo, issue.IID, "pinard: discarded — reset to retry on next cycle (remove `pinard:discarded` label to re-spawn)")
 					log.Printf("[issue-watcher] Discarded %s #%d — reset to seen", vigneName, issue.IID)
 					// Fall through to label check below (will skip due to pinard:discarded)
 				} else {
@@ -120,12 +153,12 @@ func (w *IssueWatcher) Run() error {
 					// Contract found. If funded but pubkey mismatch — fail immediately.
 					if cr.Funded && !cr.PubkeyMatch {
 						log.Printf("[issue-watcher] %s #%d: pubkey mismatch — marking failed", vigneName, issue.IID)
-						w.GitLab.UpdateIssue(vigne.Repo, issue.IID, map[string]string{
+						w.updateIssue(vigne.Repo, issue.IID, map[string]string{
 							"remove_labels": "capsule:awaiting-funding,capsule:funded",
 							"add_labels":    "capsule:failed",
 						})
 						note := fmt.Sprintf("pinard: capsule funding gate — %s (contract `%s`)", cr.Error, cr.ContractID)
-						w.GitLab.PostIssueNote(vigne.Repo, issue.IID, note)
+						w.postIssueNote(vigne.Repo, issue.IID, note)
 						w.State.Update(func(s *state.IssueWatcherState) {
 							if s.Seen == nil {
 								s.Seen = make(map[string]map[string]*state.SeenIssue)
@@ -145,7 +178,7 @@ func (w *IssueWatcher) Run() error {
 					}
 					// Contract found, unfunded or funded+matching — gate on funding.
 					log.Printf("[issue-watcher] %s #%d: capsule-gated (contract=%s) — awaiting funding, not spawning", vigneName, issue.IID, cr.ContractID)
-					w.GitLab.UpdateIssue(vigne.Repo, issue.IID, map[string]string{
+					w.updateIssue(vigne.Repo, issue.IID, map[string]string{
 						"add_labels": "capsule:awaiting-funding",
 					})
 					w.State.Update(func(s *state.IssueWatcherState) {
@@ -297,20 +330,20 @@ func (w *IssueWatcher) spawnIfApproved(vigneName, repo string, issue gitlab.Issu
 		}
 		// Approved: remove the stale awaiting-approval label, then spawn.
 		log.Printf("[issue-watcher] Owner approved %s #%d — spawning", vigneName, issue.IID)
-		w.GitLab.UpdateIssue(repo, issue.IID, map[string]string{
+		w.updateIssue(repo, issue.IID, map[string]string{
 			"remove_labels": "pinard:awaiting-approval",
 		})
 	} else if existing == nil || existing.Status == "seen" {
 		if !w.isOwnerApproved(repo, issue) {
 			// Hold and surface.
-			w.GitLab.UpdateIssue(repo, issue.IID, map[string]string{
+			w.updateIssue(repo, issue.IID, map[string]string{
 				"add_labels": "pinard:awaiting-approval",
 			})
 			note := fmt.Sprintf(
 				"assigned by @%s — @%s must comment `@%s approve` (or `approved`/`go`) to run",
 				issue.Author.Username, w.Owner, w.User,
 			)
-			w.GitLab.PostIssueNote(repo, issue.IID, note)
+			w.postIssueNote(repo, issue.IID, note)
 			w.recordIssue(vigneName, issue, "awaiting-approval", contractID)
 			log.Printf("[issue-watcher] Held %s #%d pending owner approval (author: @%s)", vigneName, issue.IID, issue.Author.Username)
 			return false
@@ -449,7 +482,7 @@ func (w *IssueWatcher) autoSpawnForIssue(project, repo string, issue gitlab.Issu
 			if errMsg == "" {
 				errMsg = err.Error()
 			}
-			w.GitLab.PostIssueNote(repo, issue.IID, fmt.Sprintf("⚠️ **Auto-spawn failed** — will retry next cycle.\n\n```\n%s\n```", errMsg))
+			w.postIssueNote(repo, issue.IID, fmt.Sprintf("⚠️ **Auto-spawn failed** — will retry next cycle.\n\n```\n%s\n```", errMsg))
 			w.State.Update(func(s *state.IssueWatcherState) {
 				if proj := s.Seen[project]; proj != nil {
 					if entry := proj[fmt.Sprintf("%d", issue.IID)]; entry != nil {
@@ -463,7 +496,7 @@ func (w *IssueWatcher) autoSpawnForIssue(project, repo string, issue gitlab.Issu
 	log.Printf("[auto-spawn] Spawned agent for %s #%d: %s", project, issue.IID, strings.TrimSpace(string(out)))
 
 	// Mark issue as in-progress
-	w.GitLab.UpdateIssue(repo, issue.IID, map[string]string{
+	w.updateIssue(repo, issue.IID, map[string]string{
 		"add_labels": "in-progress",
 	})
 	return true
@@ -702,7 +735,7 @@ func (w *IssueWatcher) checkClosed(vigneName, repo string) {
 			continue
 		}
 
-		issue, err := w.GitLab.GetIssue(repo, iid)
+		issue, err := w.getIssue(repo, iid)
 		if err != nil {
 			continue
 		}
@@ -714,4 +747,89 @@ func (w *IssueWatcher) checkClosed(vigneName, repo string) {
 			log.Printf("[issue-watcher] Issue %s #%d closed", vigneName, iid)
 		}
 	}
+}
+
+// — pressoir seam helpers —
+//
+// These route through w.Pressoir when available, falling back to w.GitLab.
+// They return gitlab.Issue / void so existing call sites need no field renames;
+// a later migration can drop the conversion when the neutral model fields
+// (Number, Body, Author string) are adopted everywhere.
+
+// listIssues returns issues assigned to the given user for a repo.
+func (w *IssueWatcher) listIssues(repo, user string) ([]gitlab.Issue, error) {
+	if p := w.pressoirFor(repo); p != nil {
+		pIssues, err := p.ListIssues(context.Background(), pressoir.RepoRefFromPath(repo), pressoir.IssueFilter{Assignee: user})
+		if err != nil {
+			return nil, err
+		}
+		return pressoirIssuesToGitLab(pIssues), nil
+	}
+	return w.GitLab.ListIssues(repo, user)
+}
+
+// getIssue fetches a single issue by IID.
+func (w *IssueWatcher) getIssue(repo string, iid int) (*gitlab.Issue, error) {
+	if p := w.pressoirFor(repo); p != nil {
+		pi, err := p.GetIssue(context.Background(), pressoir.RepoRefFromPath(repo), iid)
+		if err != nil {
+			return nil, err
+		}
+		gi := pressoirIssueToGitLab(pi)
+		return &gi, nil
+	}
+	return w.GitLab.GetIssue(repo, iid)
+}
+
+// updateIssue updates issue labels/state via the neutral model.
+func (w *IssueWatcher) updateIssue(repo string, iid int, params map[string]string) error {
+	if p := w.pressoirFor(repo); p != nil {
+		return p.UpdateIssue(context.Background(), pressoir.RepoRefFromPath(repo), iid, params)
+	}
+	w.GitLab.UpdateIssue(repo, iid, params)
+	return nil
+}
+
+// postIssueNote posts a plain comment on an issue.
+func (w *IssueWatcher) postIssueNote(repo string, iid int, body string) error {
+	if p := w.pressoirFor(repo); p != nil {
+		return p.Comment(context.Background(), pressoir.RepoRefFromPath(repo), iid, body)
+	}
+	w.GitLab.PostIssueNote(repo, iid, body)
+	return nil
+}
+
+// pressoirIssueToGitLab converts a pressoir.Issue to a gitlab.Issue so
+// existing field-access code (`.IID`, `.Description`, `.Author.Username`)
+// continues to compile without change.
+func pressoirIssueToGitLab(pi pressoir.Issue) gitlab.Issue {
+	return gitlab.Issue{
+		IID:         pi.Number,
+		State:       pi.State,
+		Title:       pi.Title,
+		Description: pi.Body,
+		Labels:      pi.Labels,
+		WebURL:      pi.WebURL,
+		Author:      gitlab.Author{Username: pi.Author},
+	}
+}
+
+func pressoirIssuesToGitLab(pIssues []pressoir.Issue) []gitlab.Issue {
+	out := make([]gitlab.Issue, len(pIssues))
+	for i, pi := range pIssues {
+		out[i] = pressoirIssueToGitLab(pi)
+	}
+	return out
+}
+
+// splitCSV splits a comma-separated string into a slice, returning nil for empty input.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
 }

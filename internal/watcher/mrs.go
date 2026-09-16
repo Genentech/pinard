@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"github.com/Genentech/pinard/internal/config"
 	"github.com/Genentech/pinard/internal/gitlab"
 	"github.com/Genentech/pinard/internal/pnats"
+	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/Genentech/pinard/internal/session"
 	"github.com/Genentech/pinard/internal/state"
 )
@@ -28,15 +30,57 @@ const conductorMarker = "<!-- pinard:conductor -->"
 const memoryMarkerPrefix = "@memory:"
 
 type MRWatcher struct {
-	State       *state.Store[state.MRWatcherState]
-	IssueState  *state.Store[state.IssueWatcherState]
-	NATS        *pnats.Client
-	KV          pnats.KVWriter
-	GitLab      *gitlab.Client
-	Vignoble    *config.Vignoble
+	State          *state.Store[state.MRWatcherState]
+	IssueState     *state.Store[state.IssueWatcherState]
+	NATS           *pnats.Client
+	KV             pnats.KVWriter
+	// Pressoir is the vignoble-default provider-neutral adapter (fallback when
+	// Resolver is nil or per-repo resolution fails).
+	Pressoir       pressoir.Pressoir
+	// Resolver resolves the correct pressoir adapter per repo so that a vigne
+	// configured with pressoir: github is not polled via the GitLab adapter.
+	Resolver       *PressoirResolver
+	// GitLab is retained for note forwarding, pipeline ID tracking, MR memory
+	// events, and approval checks — all of which use the richer gitlab.Note /
+	// gitlab.Pipeline types that the neutral model does not yet expose.
+	GitLab         *gitlab.Client
+	Vignoble       *config.Vignoble
 	IgnoredAuthors map[string]bool
-	Session     session.Manager
-	User        string // GitLab username to watch assignments for
+	Session        session.Manager
+	User           string // GitLab username to watch assignments for
+}
+
+// isGitLabRepo reports whether the given repo is served by the GitLab provider.
+// Used to gate GitLab-specific API calls (approvals, discussions, memory events)
+// so they are not attempted against GitHub repos even when w.GitLab is non-nil.
+func (w *MRWatcher) isGitLabRepo(repo string) bool {
+	return w.Vignoble.ResolvePressoirConfig(repo).Provider() == "gitlab"
+}
+
+// providerLabel returns the pressoir provider name for the given repo ("github"
+// or "gitlab"). Used to stamp event payloads so the extension can render
+// provider-aware labels ("PR #N" vs "MR !N").
+func (w *MRWatcher) providerLabel(repo string) string {
+	return w.Vignoble.ResolvePressoirConfig(repo).Provider()
+}
+
+// prRef returns the provider-aware PR/MR reference string (e.g. "PR #42" or
+// "MR !42") for use in human-readable dispatch messages.
+func prRef(provider string, iid int) string {
+	if provider == "github" {
+		return fmt.Sprintf("PR #%d", iid)
+	}
+	return fmt.Sprintf("MR !%d", iid)
+}
+
+// pressoirFor returns the pressoir adapter for the given repo path.
+// When a Resolver is configured it performs per-repo selection;
+// otherwise the watcher-level Pressoir fallback is used.
+func (w *MRWatcher) pressoirFor(repo string) pressoir.Pressoir {
+	if w.Resolver != nil {
+		return w.Resolver.For(repo)
+	}
+	return w.Pressoir
 }
 
 func (w *MRWatcher) Run() error {
@@ -92,7 +136,9 @@ func (w *MRWatcher) Run() error {
 
 		alive := w.sessionIsAlive(sessionName)
 
-		mr, err := w.GitLab.GetMR(entry.Repo, entry.MR)
+		ctx := context.Background()
+		repoRef := pressoir.RepoRefFromPath(entry.Repo)
+		pr, err := w.pressoirFor(entry.Repo).GetPR(ctx, repoRef, entry.MR)
 		if err != nil {
 			log.Printf("[mr-watcher] Error fetching MR !%d on %s: %v", entry.MR, entry.Repo, err)
 			if strings.Contains(err.Error(), ": 404 ") {
@@ -111,13 +157,13 @@ func (w *MRWatcher) Run() error {
 				s.Watched[sessionName].NotFoundCount = 0
 			})
 		}
-		log.Printf("[mr-watcher] MR !%d on %s: state=%s", entry.MR, entry.Project, mr.State)
+		log.Printf("[mr-watcher] MR !%d on %s: state=%s", entry.MR, entry.Project, pr.State)
 
 		// Add auto-merge label if vigne has auto_merge enabled
 		if !entry.AutoMergeLabeled && entry.MR > 0 {
 			if vigne, ok := w.Vignoble.Config.Vignes[entry.Project]; ok {
 				if vigne.ShouldAutoMerge(w.Vignoble.Config.AutoMerge) {
-					w.GitLab.UpdateMR(entry.Repo, entry.MR, map[string]string{
+					w.pressoirFor(entry.Repo).UpdatePR(ctx, repoRef, entry.MR, map[string]string{
 						"add_labels": "auto-merge",
 					})
 					w.State.Update(func(s *state.MRWatcherState) {
@@ -129,22 +175,29 @@ func (w *MRWatcher) Run() error {
 		}
 
 		// MR merged or closed
-		if mr.State == "merged" || mr.State == "closed" {
-			w.publishEvent(sessionName, fmt.Sprintf("mr_%s", mr.State), map[string]any{
-				"mr":      entry.MR,
-				"project": entry.Project,
+		if pr.State == "merged" || pr.State == "closed" {
+			w.publishEvent(sessionName, fmt.Sprintf("mr_%s", pr.State), map[string]any{
+				"mr":       entry.MR,
+				"project":  entry.Project,
+				"pressoir": w.providerLabel(entry.Repo),
 			})
 
 			// If this was an issue-driven process run, mark the issue as closed
-			if mr.State == "merged" {
+			if pr.State == "merged" {
 				if issueIID := w.extractIssueFromRunID(sessionName, entry.Project); issueIID > 0 {
 					w.markIssueClosed(entry.Project, issueIID)
 				}
 				// Publish memory event for knowledge ingestion (fail-open).
-				w.publishMRMemoryEvent(entry, mr)
+				// Uses GitLab client directly as the memory pipeline operates on gitlab.MergeRequest.
+				// Skip for GitHub repos — the GitLab API is not applicable.
+				if w.isGitLabRepo(entry.Repo) {
+					if glMR, glErr := w.GitLab.GetMR(entry.Repo, entry.MR); glErr == nil {
+						w.publishMRMemoryEvent(entry, glMR)
+					}
+				}
 			}
 
-			if mr.State == "merged" && w.shouldMonitorPostMerge(entry.Project) {
+			if pr.State == "merged" && w.shouldMonitorPostMerge(entry.Project) {
 				// Not terminal yet — keep the worker until the post-merge main
 				// pipeline resolves (handlePostMerge reaps on success). Applies
 				// uniformly to process and non-process workers: a single reap
@@ -154,7 +207,7 @@ func (w *MRWatcher) Run() error {
 					e.State = "post_merge"
 					e.MergedAt = time.Now().UTC().Format(time.RFC3339)
 					e.PostMergeChecks = 0
-					e.MergeCommitSHA = mr.MergeCommitSHA
+					e.MergeCommitSHA = pr.MergeSHA
 				})
 			} else {
 				// Merged with no post-merge monitoring, or closed → terminal now.
@@ -169,6 +222,9 @@ func (w *MRWatcher) Run() error {
 
 		// Check pipeline
 		w.checkPipeline(sessionName, entry, alive)
+
+		// Auto-review (independent of auto-merge)
+		w.tryAutoReview(sessionName, entry)
 
 		// Auto-merge
 		w.tryAutoMerge(sessionName, entry)
@@ -333,11 +389,12 @@ func (w *MRWatcher) publishEvent(session, eventType string, data map[string]any)
 	}
 
 	// Dispatch actionable events directly to the worker inbox
+	provider, _ := data["pressoir"].(string)
 	switch eventType {
 	case "pipeline_failed":
 		mr := ""
-		if v, ok := data["mr"]; ok {
-			mr = fmt.Sprintf("MR !%v", v)
+		if _, ok := data["mr"]; ok {
+			mr = prRef(provider, int(dataInt(data["mr"])))
 		}
 		w.dispatchToWorkerWithType(session, eventType, fmt.Sprintf("CI pipeline failed on %s (attempt %v/%v). See: %v. Fix the failing job and push.",
 			mr, data["attempt"], data["max"], data["url"]), data)
@@ -349,14 +406,14 @@ func (w *MRWatcher) publishEvent(session, eventType string, data map[string]any)
 		w.dispatchToWorkerWithType(session, eventType, msg, data)
 	case "main_pipeline_failed":
 		mr := ""
-		if v, ok := data["mr"]; ok {
-			mr = fmt.Sprintf("MR !%v", v)
+		if _, ok := data["mr"]; ok {
+			mr = prRef(provider, int(dataInt(data["mr"])))
 		}
 		w.dispatchToWorkerWithType(session, eventType, fmt.Sprintf("Main pipeline failed after %s. See: %v. Investigate and fix.", mr, data["url"]), data)
 	case "tag_pipeline_failed":
 		w.dispatchToWorkerWithType(session, eventType, fmt.Sprintf("Tag %v pipeline failed. See: %v. Investigate and fix.", data["tag"], data["url"]), data)
 	case "mr_merged", "auto_merged", "mr_closed":
-		w.dispatchToWorkerWithType(session, eventType, fmt.Sprintf("MR %s.", eventType), data)
+		w.dispatchToWorkerWithType(session, eventType, fmt.Sprintf("%s %s.", prRef(provider, int(dataInt(data["mr"]))), eventType), data)
 	}
 }
 
@@ -737,7 +794,7 @@ func (w *MRWatcher) forwardNotes(sessionName string, entry *state.WatchedMR) {
 	}
 	log.Printf("[mr-watcher] %d new note(s) on MR !%d (last_note_id was %d, now %d)", len(newNotes), entry.MR, entry.LastNoteID, newNotes[len(newNotes)-1].ID)
 
-	parts := []string{fmt.Sprintf("Review feedback on MR !%d (%d comment(s) — address EACH one):", entry.MR, len(newNotes))}
+	parts := []string{fmt.Sprintf("Review feedback on %s (%d comment(s) — address EACH one):", prRef(w.providerLabel(entry.Repo), entry.MR), len(newNotes))}
 	notesDetail := []map[string]any{}
 
 	encodedRepo := strings.ReplaceAll(entry.Repo, "/", "%2F")
@@ -777,11 +834,12 @@ func (w *MRWatcher) forwardNotes(sessionName string, entry *state.WatchedMR) {
 
 	log.Printf("[mr-watcher] Forwarding %d note(s) to %s for MR !%d", len(newNotes), sessionName, entry.MR)
 	w.publishEvent(sessionName, "review_comment", map[string]any{
-		"mr":      entry.MR,
-		"project": entry.Project,
-		"repo":    entry.Repo,
-		"message": message,
-		"notes":   notesDetail,
+		"mr":       entry.MR,
+		"project":  entry.Project,
+		"repo":     entry.Repo,
+		"message":  message,
+		"notes":    notesDetail,
+		"pressoir": w.providerLabel(entry.Repo),
 	})
 }
 
@@ -811,16 +869,18 @@ func (w *MRWatcher) checkPipeline(sessionName string, entry *state.WatchedMR, al
 				"mr":         entry.MR,
 				"project":    entry.Project,
 				"fail_count": failCount,
+				"pressoir":   w.providerLabel(entry.Repo),
 			})
 			w.stopSession(sessionName)
 		} else if alive || w.getWorkerProcess(sessionName) != "" {
 			// Always dispatch for process workers (orphan recovery ensures respawn)
 			w.publishEvent(sessionName, "pipeline_failed", map[string]any{
-				"mr":      entry.MR,
-				"project": entry.Project,
-				"attempt": failCount,
-				"max":     maxFailures,
-				"url":     latest.WebURL,
+				"mr":       entry.MR,
+				"project":  entry.Project,
+				"attempt":  failCount,
+				"max":      maxFailures,
+				"url":      latest.WebURL,
+				"pressoir": w.providerLabel(entry.Repo),
 			})
 		}
 	} else if latest.Status == "success" && entry.LastPipelineID > 0 {
@@ -830,10 +890,100 @@ func (w *MRWatcher) checkPipeline(sessionName string, entry *state.WatchedMR, al
 			e.LastPipelineID = latest.ID
 		})
 		w.publishEvent(sessionName, "pipeline_passed", map[string]any{
-			"mr":      entry.MR,
-			"project": entry.Project,
+			"mr":       entry.MR,
+			"project":  entry.Project,
+			"pressoir": w.providerLabel(entry.Repo),
 		})
 	}
+}
+
+func (w *MRWatcher) tryAutoReview(sessionName string, entry *state.WatchedMR) {
+	projectName := entry.Project
+	vigne, ok := w.Vignoble.Config.Vignes[projectName]
+	if !ok {
+		return
+	}
+	if !vigne.ShouldAutoReview(w.Vignoble.Config.AutoReview) {
+		return
+	}
+
+	// CI gate: only review when CI is green.
+	ctx := context.Background()
+	repoRef := pressoir.RepoRefFromPath(entry.Repo)
+	ciStatus, err := w.pressoirFor(entry.Repo).CIStatusFor(ctx, repoRef, entry.MR)
+	if err != nil || ciStatus.State != "success" {
+		return
+	}
+
+	// Draft gate + get HEAD SHA in one call.
+	pr, err := w.pressoirFor(entry.Repo).GetPR(ctx, repoRef, entry.MR)
+	if err != nil {
+		return
+	}
+	if pr.Draft {
+		return
+	}
+
+	// Noise filter: skip trivial/mechanical MRs (docs sync, chart/image bumps,
+	// reverts) that do not warrant a full maître review turn. Mirrors the
+	// mr-knowledge-ingestion skip heuristics.
+	for _, re := range mrMemorySkipPatterns {
+		if re.MatchString(pr.Title) {
+			log.Printf("[auto-review] Skipping trivial MR !%d (%q) on %s", entry.MR, pr.Title, projectName)
+			// Mark as reviewed so the watcher doesn't retry on the same SHA.
+			w.State.Update(func(s *state.MRWatcherState) {
+				e := s.Watched[sessionName]
+				e.ReviewedSHA = pr.HeadSHA
+			})
+			return
+		}
+	}
+
+	headSHA := pr.HeadSHA
+	if headSHA == "" {
+		// Cannot determine HEAD SHA — skip to avoid re-notifying every tick.
+		return
+	}
+
+	// SHA gate: already reviewed at this commit.
+	if entry.ReviewedSHA == headSHA {
+		return
+	}
+
+	// Resolve parcelle for the owning maître.
+	parcelle := w.getWorkerParcelle(sessionName)
+	if parcelle == "" {
+		log.Printf("[auto-review] Cannot resolve parcelle for session %q — skipping review notification", sessionName)
+		return
+	}
+
+	// Publish needs_review notification to the owning maître.
+	// The maître reviews the diff and posts a signed comment only — no
+	// automatic approval. Approval remains a human or forge-side act.
+	subject := pnats.NotificationsSubject(w.Vignoble.Name, parcelle)
+	payload := map[string]any{
+		"type":      "needs_review",
+		"message":   fmt.Sprintf("MR !%d on %s is green — review needed", entry.MR, projectName),
+		"mr":        entry.MR,
+		"project":   projectName,
+		"repo":      entry.Repo,
+		"url":       pr.WebURL,
+		"sha":       headSHA,
+		"session":   sessionName,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := w.NATS.Publish(subject, payload); err != nil {
+		log.Printf("[auto-review] Failed to publish needs_review for MR !%d (%s): %v", entry.MR, projectName, err)
+		return
+	}
+	log.Printf("[auto-review] Sent needs_review for MR !%d on %s to maître parcelle %q (sha=%s)", entry.MR, projectName, parcelle, headSHA)
+
+	// Optimistic SHA mark: prevents re-notification until a new commit is pushed.
+	w.State.Update(func(s *state.MRWatcherState) {
+		e := s.Watched[sessionName]
+		e.ReviewedSHA = headSHA
+		e.ReviewNotified = true
+	})
 }
 
 func (w *MRWatcher) tryAutoMerge(sessionName string, entry *state.WatchedMR) {
@@ -846,97 +996,119 @@ func (w *MRWatcher) tryAutoMerge(sessionName string, entry *state.WatchedMR) {
 		return
 	}
 
-	pipelines, err := w.GitLab.ListMRPipelines(entry.Repo, entry.MR)
-	if err != nil {
-		return
-	}
-	if len(pipelines) == 0 || (pipelines[0].Status != "success") {
+	// CI gate via the neutral Pressoir seam — works for both GitLab and GitHub.
+	// NOTE: checkPipeline (pipeline-ID circuit breaker + pipeline_failed events) is
+	// GitLab-specific and is intentionally kept separate from this auto-merge gate.
+	ctxCI := context.Background()
+	repoRefCI := pressoir.RepoRefFromPath(entry.Repo)
+	ciStatus, err := w.pressoirFor(entry.Repo).CIStatusFor(ctxCI, repoRefCI, entry.MR)
+	if err != nil || ciStatus.State != "success" {
 		return
 	}
 
-	approvals, err := w.GitLab.GetMRApprovals(entry.Repo, entry.MR)
-	if err != nil {
-		log.Printf("[auto-merge] Failed to check approvals for MR !%d: %v", entry.MR, err)
-		return
-	}
-	if !approvals.Approved {
-		if !entry.NeedsApprovalNotified {
-			mr, _ := w.GitLab.GetMR(entry.Repo, entry.MR)
-			url := ""
-			if mr != nil {
-				url = mr.WebURL
+	// Approval gate — provider-neutral via the pressoir seam.
+	// For GitHub: if the approval status cannot be read (e.g. insufficient PAT
+	// scope), fall through and let the Merge call enforce branch-protection rules.
+	{
+		ctxApproval := context.Background()
+		repoRefApproval := pressoir.RepoRefFromPath(entry.Repo)
+		approvalStatus, approvalErr := w.pressoirFor(entry.Repo).GetApprovalStatus(ctxApproval, repoRefApproval, entry.MR)
+		if approvalErr != nil {
+			if w.isGitLabRepo(entry.Repo) {
+				// GitLab approval read is required; block on error.
+				log.Printf("[auto-merge] Failed to check approvals for MR !%d: %v", entry.MR, approvalErr)
+				return
 			}
-			w.publishEvent(sessionName, "needs_approval", map[string]any{
-				"mr":      entry.MR,
-				"project": projectName,
-				"url":     url,
-			})
-			w.State.Update(func(s *state.MRWatcherState) {
-				s.Watched[sessionName].NeedsApprovalNotified = true
-			})
+			// GitHub: degrade gracefully — GitHub enforces at merge time via branch protection.
+			log.Printf("[auto-merge] Could not read GitHub approval status for PR #%d (falling through): %v", entry.MR, approvalErr)
+		} else if !approvalStatus.Approved {
+			if !entry.NeedsApprovalNotified {
+				ctxPR := context.Background()
+				repoRefPR := pressoir.RepoRefFromPath(entry.Repo)
+				pr, _ := w.pressoirFor(entry.Repo).GetPR(ctxPR, repoRefPR, entry.MR)
+				w.publishEvent(sessionName, "needs_approval", map[string]any{
+					"mr":       entry.MR,
+					"project":  projectName,
+					"url":      pr.WebURL,
+					"pressoir": w.providerLabel(entry.Repo),
+				})
+				w.State.Update(func(s *state.MRWatcherState) {
+					s.Watched[sessionName].NeedsApprovalNotified = true
+				})
+			}
+			return
 		}
-		return
 	}
 
-	mr, err := w.GitLab.GetMR(entry.Repo, entry.MR)
+	ctx := context.Background()
+	repoRef := pressoir.RepoRefFromPath(entry.Repo)
+	pr, err := w.pressoirFor(entry.Repo).GetPR(ctx, repoRef, entry.MR)
 	if err != nil {
 		return
 	}
 	// Never auto-merge a Draft/WIP MR — Draft is the mechanism used to hold an
 	// MR for review fixes; merging it would ship pre-review code.
-	if mr.Draft || mr.WorkInProgress {
+	if pr.Draft {
 		return
 	}
-	mrAuthor := mr.Author.Username
+	mrAuthor := pr.Author
 
-	discussions, err := w.GitLab.ListMRDiscussions(entry.Repo, entry.MR)
-	if err != nil {
-		return
-	}
-	for _, d := range discussions {
-		hasUnresolved := false
-		onlyAuthorOrSystem := true
-		for _, n := range d.Notes {
-			if n.Resolvable && !n.Resolved {
-				hasUnresolved = true
-				if !n.System && n.Author.Username != mrAuthor && !w.IgnoredAuthors[n.Author.Username] {
-					onlyAuthorOrSystem = false
+	// Discussion check: use GitLab client which has the richer Note type
+	// (Resolvable/Resolved fields not in pressoir.Comment).
+	// Skipped for GitHub repos — branch-protection enforces reviews there.
+	if w.isGitLabRepo(entry.Repo) {
+		discussions, err := w.GitLab.ListMRDiscussions(entry.Repo, entry.MR)
+		if err != nil {
+			return
+		}
+		for _, d := range discussions {
+			hasUnresolved := false
+			onlyAuthorOrSystem := true
+			for _, n := range d.Notes {
+				if n.Resolvable && !n.Resolved {
+					hasUnresolved = true
+					if !n.System && n.Author.Username != mrAuthor && !w.IgnoredAuthors[n.Author.Username] {
+						onlyAuthorOrSystem = false
+					}
 				}
 			}
-		}
-		if hasUnresolved && !onlyAuthorOrSystem {
-			return
+			if hasUnresolved && !onlyAuthorOrSystem {
+				return
+			}
 		}
 	}
 
 	log.Printf("[auto-merge] Attempting merge of MR !%d on %s (approved, CI passed, no unresolved threads)", entry.MR, entry.Project)
-	if err := w.GitLab.MergeMR(entry.Repo, entry.MR); err != nil {
+	if err := w.pressoirFor(entry.Repo).Merge(ctx, repoRef, entry.MR, pressoir.MergeOpts{}); err != nil {
 		log.Printf("[auto-merge] Failed to merge MR !%d: %v", entry.MR, err)
 		return
 	}
 	log.Printf("[auto-merge] Successfully merged MR !%d on %s", entry.MR, entry.Project)
 
 	w.publishEvent(sessionName, "auto_merged", map[string]any{
-		"mr":      entry.MR,
-		"project": projectName,
+		"mr":       entry.MR,
+		"project":  projectName,
+		"pressoir": w.providerLabel(entry.Repo),
 	})
 	// Publish memory event for knowledge ingestion (fail-open).
-	w.publishMRMemoryEvent(entry, mr)
+	// Memory pipeline uses gitlab.MergeRequest type directly; skip for GitHub repos.
+	if w.isGitLabRepo(entry.Repo) {
+		if glMR, glErr := w.GitLab.GetMR(entry.Repo, entry.MR); glErr == nil {
+			w.publishMRMemoryEvent(entry, glMR)
+		}
+	}
 
 	if w.shouldMonitorPostMerge(projectName) {
 		// Keep the worker until the post-merge main pipeline resolves; reap then
 		// (handlePostMerge). Do NOT kill here — an immediate kill blinds us to a
 		// main_pipeline_failed the worker could fix.
-		mergeCommitSHA := ""
-		if mr, err := w.GitLab.GetMR(entry.Repo, entry.MR); err == nil {
-			mergeCommitSHA = mr.MergeCommitSHA
-		}
+		latestPR, _ := w.pressoirFor(entry.Repo).GetPR(ctx, repoRef, entry.MR)
 		w.State.Update(func(s *state.MRWatcherState) {
 			e := s.Watched[sessionName]
 			e.State = "post_merge"
 			e.MergedAt = time.Now().UTC().Format(time.RFC3339)
 			e.PostMergeChecks = 0
-			e.MergeCommitSHA = mergeCommitSHA
+			e.MergeCommitSHA = latestPR.MergeSHA
 		})
 	} else {
 		// No post-merge monitoring → terminal now.
@@ -963,16 +1135,18 @@ func (w *MRWatcher) handlePostMerge(sessionName string, entry *state.WatchedMR) 
 			latest := pipelines[0]
 			if latest.Status == "success" {
 				w.publishEvent(sessionName, "main_pipeline_passed", map[string]any{
-					"mr":      entry.MR,
-					"project": entry.Project,
+					"mr":       entry.MR,
+					"project":  entry.Project,
+					"pressoir": w.providerLabel(entry.Repo),
 				})
 				// Terminal: MR merged + main pipeline green → nothing left to do.
 				w.reapWorker(sessionName)
 			} else if latest.Status == "failed" {
 				w.publishEvent(sessionName, "main_pipeline_failed", map[string]any{
-					"mr":      entry.MR,
-					"project": entry.Project,
-					"url":     latest.WebURL,
+					"mr":       entry.MR,
+					"project":  entry.Project,
+					"url":      latest.WebURL,
+					"pressoir": w.providerLabel(entry.Repo),
 				})
 				// Do NOT reap — a main_pipeline_failed was dispatched, so the
 				// worker (or, once event-driven respawn lands, orphan-recovery)

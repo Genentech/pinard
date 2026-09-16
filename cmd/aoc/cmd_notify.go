@@ -51,13 +51,20 @@ var notifyCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "[nats] publish error: %v\n", err)
 		}
 
-		// Log to file
-		stateDir := os.Getenv("AOC_STATE_DIR")
-		if stateDir == "" {
-			home, _ := os.UserHomeDir()
-			stateDir = filepath.Join(home, ".config", "aoc")
+		// Log to file — prefer per-vignoble state dir so notifications stay
+		// scoped to the vignoble and get_notifications can read the right file.
+		var logFile string
+		if v, err := config.ResolveVignoble(); err == nil {
+			logFile = filepath.Join(v.StateDir, "notifications.log")
+		} else {
+			// No vignoble context — fall back to global dir (standalone workers)
+			stateDir := os.Getenv("AOC_STATE_DIR")
+			if stateDir == "" {
+				home, _ := os.UserHomeDir()
+				stateDir = filepath.Join(home, ".config", "aoc")
+			}
+			logFile = filepath.Join(stateDir, "notifications.log")
 		}
-		logFile := filepath.Join(stateDir, "notifications.log")
 		os.MkdirAll(filepath.Dir(logFile), 0755)
 		f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err == nil {

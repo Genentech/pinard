@@ -1,0 +1,91 @@
+name: Publish container images
+
+# Builds and pushes public container images to GitHub Container Registry (GHCR)
+# on every tagged release. Uses the built-in GITHUB_TOKEN — no extra secrets required.
+#
+# Images published:
+#   ghcr.io/genentech/pinard:<version>           — k8s services image (webterm-gateway +
+#                                                   memory services + static docs site),
+#                                                   built from the root Dockerfile.
+#                                                   Does NOT include the aoc CLI/daemon,
+#                                                   which is host-installed (see install).
+#   ghcr.io/genentech/pinard-webterm-gateway:<version> — standalone gateway image,
+#                                                   built from cmd/webterm-gateway/Dockerfile.
+#
+# Tags applied to each image:
+#   <semver>   e.g. 0.61.0
+#   latest
+#
+# Engram: the Gentleman-Programming/engram binary is a third-party release and is
+# intentionally NOT baked into a Genentech-published image to avoid licensing and
+# naming ambiguity. Install engram from https://github.com/Gentleman-Programming/engram
+# and mount/inject it at runtime if needed. See README for details.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write   # push to ghcr.io
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/genentech/pinard
+
+jobs:
+  build-and-push:
+    name: Build & push images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (for multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from release tag
+        id: version
+        run: |
+          # Release tags are "v<semver>" (e.g. v0.61.0); strip the leading "v".
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # ── k8s services image (root Dockerfile) ─────────────────────────────
+      # Includes: webterm-gateway, memory services, static docs site.
+      # Does NOT include aoc (host-installed CLI/daemon — see install script).
+      - name: Build and push k8s services image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_BASE }}:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE_BASE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Standalone gateway image (cmd/webterm-gateway/Dockerfile) ─────────
+      - name: Build and push webterm-gateway image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: cmd/webterm-gateway/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_BASE }}-webterm-gateway:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE_BASE }}-webterm-gateway:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

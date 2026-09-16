@@ -4,7 +4,7 @@ weight: 32
 group: Memory
 ---
 
-> **Status:** ✅ shipped (core ontology + domain extension + CLI). The Go ontology registry replaced the Python `pinard-core` package. The broader multi-model store design is 🔭 designed — see [The Layered Memory Architecture](docs/memory-architecture/).
+> **Status:** ✅ shipped (core ontology + domain extension + CLI). The Go ontology registry replaced the Python `pinard-core` package. The broader multi-model store design is 🔭 designed — see [The Layered Memory Architecture](/docs/memory-architecture/).
 
 For a fleet's knowledge to be *queryable* and *portable*, it has to be **typed**.
 Pinard types memory with a **layered ontology** and ships it as **versioned,
@@ -12,7 +12,7 @@ portable subsets**.
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/ontology-portable-memory.jpg" alt="A sketched grapevine with a stable shared trunk, distinct domain branches, young learned shoots, one human-reviewed graft toward the core, and a three-compartment portable case holding runtime, process, and memory.">
+    <img src="/images/docs/ontology-portable-memory.jpg" alt="A sketched grapevine with a stable shared trunk, distinct domain branches, young learned shoots, one human-reviewed graft toward the core, and a three-compartment portable case holding runtime, process, and memory.">
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 36%; --y: 84%;">L1 · <code>pinard-core</code></span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 20%; --y: 46%;">L2 · repository ontology</span>
     <span class="doc-figure-label doc-figure-label--desktop terracotta" style="--x: 45%; --y: 52%;">Learned types</span>
@@ -37,7 +37,7 @@ everyone. Pinard splits it into two layers instead.
 ### Layer 1 — core ontology
 
 Repo-agnostic, agent-operational concepts that mirror the primitives of a
-[semi-deterministic loop](docs/semi-deterministic-loop/). Encoded as declarative
+[semi-deterministic loop](/docs/semi-deterministic-loop/). Encoded as declarative
 YAML embedded in the Pinard binary (`internal/ontology/core.yaml`) — no Python or
 external runtime required. Small and stable, versioned centrally in Pinard:
 
@@ -157,7 +157,7 @@ Types are not frozen. They move through a lifecycle:
 
 Promotion **domain → core is human-gated** (a git PR), and a `suppressed_types` list
 retires types that stop earning their place. This is the same recurrence-plus-review
-pattern used for [rule and scope promotion](docs/memory-curation/#scope--promotion).
+pattern used for [rule and scope promotion](/docs/memory-curation/#scope--promotion).
 
 ## Portable memory subsets
 
@@ -185,5 +185,5 @@ load-bearing scope that portability introduces.
 
 ## Next
 
-- **[Teaching & Curation](docs/memory-curation/)** — how knowledge is captured, curated, and promoted.
-- **[The Layered Memory Architecture](docs/memory-architecture/)** — where the ontology sits in the stack.
+- **[Teaching & Curation](/docs/memory-curation/)** — how knowledge is captured, curated, and promoted.
+- **[The Layered Memory Architecture](/docs/memory-architecture/)** — where the ontology sits in the stack.

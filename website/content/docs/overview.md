@@ -36,7 +36,7 @@ place in the estate:
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/overview-mental-model.jpg" alt="A sketched vineyard estate divided into work plots, with an estate manager, plot foremen, harvest workers, and harvest streams converging in a blending vessel.">
+    <img src="/images/docs/overview-mental-model.jpg" alt="A sketched vineyard estate divided into work plots, with an estate manager, plot foremen, harvest workers, and harvest streams converging in a blending vessel.">
     <span class="doc-figure-region" style="--x: 5%; --y: 19%; --w: 39%; --h: 31%;" aria-hidden="true"></span>
     <span class="doc-figure-label charcoal" style="--x: 50%; --y: 4%;">Vignoble</span>
     <span class="doc-figure-label mustard" style="--x: 18%; --y: 25%;">Vigne · repository</span>
@@ -102,12 +102,12 @@ At the core, every unit of work is a **loop** run by an agent:
 5. What the agent learns is written to **memory**, so the fleet improves over time.
 6. When the loop completes, the vendangeur is **reaped**.
 
-The [SWE process](docs/swe-process/) is the reference loop: *issue → change → MR →
+The [SWE process](/docs/swe-process/) is the reference loop: *issue → change → MR →
 merge*. But you write your own loops for whatever your fleet does.
 
 ## Where to go next
 
-- **[The Semi-Deterministic Loop](docs/semi-deterministic-loop/)** — the core concept.
-- **[Getting Started](docs/getting-started/)** — install and run your first loop.
-- **[Architecture](docs/architecture/)** — the engine internals.
-- **[Memory & Recall](docs/memory/)** — how the fleet remembers and improves.
+- **[The Semi-Deterministic Loop](/docs/semi-deterministic-loop/)** — the core concept.
+- **[Getting Started](/docs/getting-started/)** — install and run your first loop.
+- **[Architecture](/docs/architecture/)** — the engine internals.
+- **[Memory & Recall](/docs/memory/)** — how the fleet remembers and improves.

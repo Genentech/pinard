@@ -145,6 +145,15 @@ func (c *Client) MergeMR(repo string, iid int) error {
 	return c.put(fmt.Sprintf("projects/%s/merge_requests/%d/merge", c.encodedRepo(repo), iid), nil)
 }
 
+// MergeMRWithMessage merges an MR and sets an explicit merge commit message.
+func (c *Client) MergeMRWithMessage(repo string, iid int, mergeCommitMessage string) error {
+	params := map[string]string{}
+	if mergeCommitMessage != "" {
+		params["merge_commit_message"] = mergeCommitMessage
+	}
+	return c.put(fmt.Sprintf("projects/%s/merge_requests/%d/merge", c.encodedRepo(repo), iid), params)
+}
+
 func (c *Client) ListIssues(repo string, assignee string) ([]Issue, error) {
 	var issues []Issue
 	path := fmt.Sprintf("projects/%s/issues?assignee_username=%s&state=opened&per_page=100",
@@ -270,4 +279,110 @@ func (c *Client) PostDiscussionNote(repo string, iid int, discussionID, body str
 		c.encodedRepo(repo), iid, discussionID),
 		map[string]string{"body": body})
 	return err
+}
+
+// MRDiscussionPosition describes the diff position for an inline discussion.
+type MRDiscussionPosition struct {
+	BaseSHA  string
+	StartSHA string
+	HeadSHA  string
+	NewPath  string
+	OldPath  string
+	NewLine  int
+	OldLine  int
+}
+
+// PostMRDiscussion opens a new MR discussion (inline when pos is non-nil, top-level otherwise).
+// For inline comments the position fields are required by GitLab.
+func (c *Client) PostMRDiscussion(repo string, iid int, body string, pos *MRDiscussionPosition) error {
+	params := map[string]string{"body": body}
+	if pos != nil {
+		params["position[position_type]"] = "text"
+		params["position[base_sha]"] = pos.BaseSHA
+		params["position[start_sha]"] = pos.StartSHA
+		params["position[head_sha]"] = pos.HeadSHA
+		params["position[new_path]"] = pos.NewPath
+		params["position[old_path]"] = pos.OldPath
+		if pos.NewLine > 0 {
+			params["position[new_line]"] = fmt.Sprintf("%d", pos.NewLine)
+		}
+		if pos.OldLine > 0 {
+			params["position[old_line]"] = fmt.Sprintf("%d", pos.OldLine)
+		}
+	}
+	_, err := c.post(fmt.Sprintf("projects/%s/merge_requests/%d/discussions", c.encodedRepo(repo), iid), params)
+	return err
+}
+
+// LookupUser resolves a GitLab username to a UserID string. Returns an error when the user is not found.
+func (c *Client) LookupUser(username string) (string, error) {
+	var users []struct {
+		ID       int    `json:"id"`
+		Username string `json:"username"`
+	}
+	if err := c.get(fmt.Sprintf("users?username=%s", url.QueryEscape(username)), &users); err != nil {
+		return "", err
+	}
+	for _, u := range users {
+		if u.Username == username {
+			return u.Username, nil
+		}
+	}
+	if len(users) > 0 {
+		return users[0].Username, nil
+	}
+	return "", fmt.Errorf("gitlab: user %q not found", username)
+}
+
+// GetUserNumericID resolves a GitLab username to its numeric ID. Returns an error when the user is not found.
+func (c *Client) GetUserNumericID(username string) (int, error) {
+	var users []struct {
+		ID       int    `json:"id"`
+		Username string `json:"username"`
+	}
+	if err := c.get(fmt.Sprintf("users?username=%s", url.QueryEscape(username)), &users); err != nil {
+		return 0, err
+	}
+	for _, u := range users {
+		if u.Username == username {
+			return u.ID, nil
+		}
+	}
+	if len(users) > 0 {
+		return users[0].ID, nil
+	}
+	return 0, fmt.Errorf("gitlab: user %q not found", username)
+}
+
+// GetProject returns the project metadata (including default_branch).
+func (c *Client) GetProject(repo string) (map[string]interface{}, error) {
+	var result map[string]interface{}
+	if err := c.get(fmt.Sprintf("projects/%s", c.encodedRepo(repo)), &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// CreateIssueLink creates a link between two issues in the same or different projects.
+func (c *Client) CreateIssueLink(repo string, iid int, targetRepo string, targetIID int, linkType string) error {
+	params := map[string]string{
+		"target_project_id": targetRepo,
+		"target_issue_iid":  fmt.Sprintf("%d", targetIID),
+		"link_type":         linkType,
+	}
+	_, err := c.post(fmt.Sprintf("projects/%s/issues/%d/links", c.encodedRepo(repo), iid), params)
+	return err
+}
+
+func (c *Client) ApproveMR(repo string, iid int) error {
+	_, err := c.post(fmt.Sprintf("projects/%s/merge_requests/%d/approve", c.encodedRepo(repo), iid), nil)
+	return err
+}
+
+// ListAllOpenMRs returns all open MRs in the project.
+func (c *Client) ListAllOpenMRs(repo string) ([]MergeRequest, error) {
+	var mrs []MergeRequest
+	path := fmt.Sprintf("projects/%s/merge_requests?state=opened&per_page=100", c.encodedRepo(repo))
+	err := c.get(path, &mrs)
+	return mrs, err
 }

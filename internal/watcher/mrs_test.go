@@ -1252,6 +1252,26 @@ func TestSanitizeReviewNote(t *testing.T) {
 	}
 }
 
+// TestPrRef verifies provider-aware PR/MR reference strings.
+func TestPrRef(t *testing.T) {
+	tests := []struct {
+		provider string
+		iid      int
+		want     string
+	}{
+		{"gitlab", 42, "MR !42"},
+		{"github", 42, "PR #42"},
+		{"", 7, "MR !7"}, // empty defaults to gitlab vocabulary
+		{"github", 1, "PR #1"},
+	}
+	for _, tt := range tests {
+		got := prRef(tt.provider, tt.iid)
+		if got != tt.want {
+			t.Errorf("prRef(%q, %d) = %q, want %q", tt.provider, tt.iid, got, tt.want)
+		}
+	}
+}
+
 // TestMRMemory_SourceContainsReviewNotes verifies review_notes is wired into the payload.
 func TestMRMemory_SourceContainsReviewNotes(t *testing.T) {
 	src, err := os.ReadFile("mrs.go")

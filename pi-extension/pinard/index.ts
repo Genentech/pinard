@@ -30,10 +30,15 @@ function buildDedupeKey(sessionId: string, type: string, data: Record<string, an
   return `${sessionId}:${type}:${dedupeExtra}`;
 }
 
+function prRef(data: Record<string, any>): string {
+  if (data.mr == null) return "";
+  return data.pressoir === "github" ? `PR #${data.mr}` : `MR !${data.mr}`;
+}
+
 function formatEventMessage(type: string, sessionId: string, data: Record<string, any>): string {
   const project = data._project || data.cwd?.split("/").pop() || sessionId;
   const sessionRef = data._agentSessionId || sessionId;
-  const mr = data.mr ? `MR !${data.mr}` : "";
+  const mr = prRef(data);
 
   if (type === "agent_idle") return `[agent-event] Agent ${project} (${sessionRef}) is idle — finished working. Check its status and decide next steps.`;
   if (type === "session_ended") return `[agent-event] Agent ${project} (${sessionRef}) session ended.`;
@@ -684,37 +689,6 @@ async function handleAgentEvent(type: string, sessionId: string, data: Record<st
     return;
   }
 
-  // Auto-spawn reviewer for needs_approval events — handled entirely by reviewer process
-  if (type === "needs_approval" && data.mr && data.project) {
-    const { existsSync } = require("node:fs");
-    const project = data.project;
-    const mr = data.mr;
-    const runId = `${project}-review-${mr}`;
-    const reviewRunDir = join(VIGNOBLE, "parcelles", "reviews", "runs", runId);
-
-    if (existsSync(reviewRunDir)) {
-      try { appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [review] Already reviewed MR !${mr} — skipping\n`); } catch {}
-    } else {
-      try {
-        const { execSync } = require("node:child_process");
-        const repo = resolveProjectRepo(project);
-        const encodedRepo = encodeURIComponent(repo);
-        const host = gitlabHost();
-        const reviewArgs = JSON.stringify({ mr, repo, project, host, encodedRepo });
-        execSync(
-          `${AOC} spawn --project "${project}" --process review --parcelle reviews --run-id "${runId}" --args '${reviewArgs.replace(/'/g, "'\\''")}'`,
-          { encoding: "utf8", timeout: 15_000 }
-        );
-        try { appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [review] Spawned reviewer for MR !${mr} on ${project} (run: ${runId})\n`); } catch {}
-      } catch (e: any) {
-        try { appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [review] Failed to spawn reviewer: ${e.message}\n`); } catch {}
-      }
-    }
-    // Don't deliver to conductor LLM — reviewer handles this
-    refreshDashboardWidget();
-    return;
-  }
-
   // Human-attention and judgment: deliver to LLM
   const message = formatEventMessage(type, sessionId, data);
   if (message && piRef && !data._batched) {
@@ -887,9 +861,14 @@ async function connectNats(retries = 2): Promise<void> {
         const messages = await notifConsumer.consume();
         for await (const msg of messages) {
           try {
-            const data = msg.json<{ message?: string; timestamp: string; type?: string; correlation_id?: string; context?: string }>();
+            const data = msg.json<{ message?: string; timestamp: string; type?: string; correlation_id?: string; context?: string; mr?: number; project?: string; repo?: string; url?: string; sha?: string; session?: string }>();
             if (IS_MAITRE && data.type === "report-request") {
               handleMaitreReportRequest(data.correlation_id, data.context);
+              msg.ack();
+              continue;
+            }
+            if (IS_MAITRE && data.type === "needs_review") {
+              handleMaitreNeedsReview(data);
               msg.ack();
               continue;
             }
@@ -907,9 +886,13 @@ async function connectNats(retries = 2): Promise<void> {
       (async () => {
         for await (const msg of notifSub) {
           try {
-            const data = msg.json<{ message?: string; timestamp: string; type?: string; correlation_id?: string; context?: string }>();
+            const data = msg.json<{ message?: string; timestamp: string; type?: string; correlation_id?: string; context?: string; mr?: number; project?: string; repo?: string; url?: string; sha?: string; session?: string }>();
             if (IS_MAITRE && data.type === "report-request") {
               handleMaitreReportRequest(data.correlation_id, data.context);
+              continue;
+            }
+            if (IS_MAITRE && data.type === "needs_review") {
+              handleMaitreNeedsReview(data);
               continue;
             }
             if (piRef) {
@@ -1089,6 +1072,7 @@ interface WorkerInfo {
   sessionId: string;
   project: string;
   mr: number | null;
+  pressoir?: string;
   status: "working" | "idle" | "completed" | "stopped";
   process?: string;
   parcelle?: string;
@@ -1142,6 +1126,7 @@ async function refreshWorkersFromKV(): Promise<void> {
           sessionId: state.session_id || key,
           project: state.project || "unknown",
           mr: state.mr || null,
+          pressoir: resolveVigneProvider(state.project || ""),
           status: getWorkerStatus(state),
           process: state.process || undefined,
           parcelle: state.parcelle || undefined,
@@ -1389,7 +1374,22 @@ function getRecentNotifications(count = 10): string[] {
   const logFile = join(VIGNOBLE, ".state", "notifications.log");
   if (!existsSync(logFile)) return [];
   try {
-    return readFileSync(logFile, "utf8").trim().split("\n").slice(-count);
+    const lines = readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean);
+    const recent = lines.slice(-count);
+    // Freshness guard: warn if the newest entry is older than 4 hours
+    const newest = lines[lines.length - 1];
+    if (newest) {
+      const tsMatch = newest.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)/);
+      if (tsMatch) {
+        const ageMs = Date.now() - new Date(tsMatch[1]).getTime();
+        const ageH = ageMs / (1000 * 60 * 60);
+        if (ageH >= 4) {
+          const ageLabel = ageH < 24 ? `${Math.round(ageH)}h` : `${Math.round(ageH / 24)}d`;
+          recent.push(`⚠️  newest notification is ${ageLabel} old — sink may be stale`);
+        }
+      }
+    }
+    return recent;
   } catch { return []; }
 }
 
@@ -1432,35 +1432,29 @@ const readIssueTool = defineTool({
       const { execFileSync } = require("node:child_process");
       const repo = resolveProjectRepo(project);
       if (!repo) return { content: [{ type: "text" as const, text: `Project "${project}" not found in vignes.yaml` }], details: undefined };
-      const encodedRepo = encodeURIComponent(repo);
-      const host = gitlabHost();
-      const issueResult = execFileSync("glab", [
-        "api", `projects/${encodedRepo}/issues/${issue}`,
-        "--hostname", host,
+      const issueResult = execFileSync(AOC, [
+        "pressoir", "get-issue", "--repo", repo, "--number", String(issue),
       ], { encoding: "utf8", timeout: 15_000 });
       const issueData = JSON.parse(issueResult);
       // Fetch comments
       let comments: string[] = [];
       try {
-        const notesResult = execFileSync("glab", [
-          "api", `projects/${encodedRepo}/issues/${issue}/notes?sort=asc`,
-          "--hostname", host,
+        const notesResult = execFileSync(AOC, [
+          "pressoir", "list-issue-notes", "--repo", repo, "--number", String(issue),
         ], { encoding: "utf8", timeout: 15_000 });
-        const notes = JSON.parse(notesResult);
-        comments = notes
-          .filter((n: any) => !n.system)
-          .map((n: any) => `@${n.author?.username || "?"} (${n.created_at?.slice(0, 10) || "?"}): ${n.body}`);
+        const notes: any[] = JSON.parse(notesResult);
+        comments = notes.map((n: any) => `@${n.Author || "?"}: ${n.Body}`);
       } catch {}
-      const labels = (issueData.labels || []).join(", ");
+      const labels = (issueData.Labels || []).join(", ");
       const text = [
-        `# ${issueData.title}`,
+        `# ${issueData.Title}`,
         ``,
-        `**State:** ${issueData.state} | **Labels:** ${labels} | **Author:** @${issueData.author?.username || "?"}`,
-        `**URL:** ${issueData.web_url}`,
+        `**State:** ${issueData.State} | **Labels:** ${labels} | **Author:** @${issueData.Author || "?"}`,
+        `**URL:** ${issueData.WebURL}`,
         ``,
         `## Description`,
         ``,
-        issueData.description || "_No description_",
+        issueData.Body || "_No description_",
         ...(comments.length > 0 ? [``, `## Comments (${comments.length})`, ``, ...comments] : []),
       ].join("\n");
       return { content: [{ type: "text" as const, text }], details: undefined };
@@ -1591,7 +1585,7 @@ const spawnAgentTool = defineTool({
   }),
   async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
     const { project } = params;
-    const { execFileSync, execSync } = require("node:child_process");
+    const { execFileSync } = require("node:child_process");
 
     // Resume existing run: spawn directly with run-id
     if (params.run_id) {
@@ -1615,29 +1609,30 @@ const spawnAgentTool = defineTool({
     if (params.issue) {
       try {
         const repo = resolveProjectRepo(project);
-        const encodedRepo = encodeURIComponent(repo);
-        const host = gitlabHost();
         const pinardUser = process.env.PINARD_GITLAB_USER || "pinard";
 
-        // Resolve pinard user ID
-        const uid = execSync(
-          `glab api users -X GET --hostname ${host} -f username=${pinardUser} 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['id'])"`,
-          { encoding: "utf8", timeout: 10_000 }
-        ).trim();
+        // Resolve pinard user's numeric ID via pressoir.
+        const userJson = execFileSync(AOC, [
+          "pressoir", "resolve-user", "--username", pinardUser,
+        ], { encoding: "utf8", timeout: 10_000 });
+        const userInfo = JSON.parse(userJson);
+        const uid: number = userInfo.ID || 0;
 
         // Build labels
         const labels = params.parcelle ? `parcelle:${params.parcelle}` : "";
 
-        // Assign + label the issue.
+        // Assign + label the issue via pressoir update-issue.
         // Prefer the owner token (PINARD_OWNER_GITLAB_TOKEN) so the assignment note
         // is authored by the human operator → satisfies the owner-gate without a
-        // manual approval comment. Fall back to bot-authenticated glab if unavailable.
+        // manual approval comment. Fall back to bot-authenticated pressoir if unavailable.
         const { appendFileSync: appendLog } = require("node:fs");
         const ownerToken = process.env.PINARD_OWNER_GITLAB_TOKEN || "";
+        const host = gitlabHost();
+        const encodedRepo = encodeURIComponent(repo);
         let assignedViaOwner = false;
-        if (ownerToken) {
+        if (ownerToken && uid) {
           try {
-            // Build query string for add_labels if needed
+            // Direct PUT using owner token (bot pressoir cannot author the owner-gate note).
             const labelParam = labels ? `&add_labels=${encodeURIComponent(labels)}` : "";
             const apiUrl = `https://${host}/api/v4/projects/${encodedRepo}/issues/${params.issue}?assignee_ids[]=${uid}${labelParam}`;
             execFileSync("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "PUT", "-H", `PRIVATE-TOKEN: ${ownerToken}`, apiUrl], { encoding: "utf8", timeout: 10_000 });
@@ -1647,9 +1642,9 @@ const spawnAgentTool = defineTool({
           }
         }
         if (!assignedViaOwner) {
-          const updateArgs = [`api`, `projects/${encodedRepo}/issues/${params.issue}`, `-X`, `PUT`, `--hostname`, host, `-f`, `assignee_ids=${uid}`];
-          if (labels) updateArgs.push(`-f`, `add_labels=${labels}`);
-          execFileSync("glab", updateArgs, { encoding: "utf8", timeout: 10_000 });
+          const updateArgs = ["pressoir", "update-issue", "--repo", repo, "--number", String(params.issue), "--assignee", pinardUser];
+          if (labels) updateArgs.push("--add-labels", labels);
+          execFileSync(AOC, updateArgs, { encoding: "utf8", timeout: 10_000 });
         }
         try { appendLog(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [spawn] assign issue #${params.issue} to ${pinardUser} on ${project}${params.parcelle ? ` parcelle=${params.parcelle}` : ""} (${assignedViaOwner ? "owner token" : "bot token"})\n`); } catch {}
 
@@ -1738,32 +1733,33 @@ const openCuveeMRTool = defineTool({
     try {
       const { execFileSync } = require("node:child_process");
       const repo = resolveProjectRepo(project);
-      const encodedRepo = encodeURIComponent(repo);
-      const host = gitlabHost();
       let targetBranch = params.target_branch || getVignes()[project]?.default_branch || "";
       if (!targetBranch) {
         try {
-          const apiResult = execFileSync("glab", ["api", `projects/${encodedRepo}`, "--hostname", host], { encoding: "utf8" });
-          targetBranch = JSON.parse(apiResult).default_branch || "main";
+          const repoJson = execFileSync(AOC, ["pressoir", "get-repo", "--repo", repo], { encoding: "utf8" });
+          targetBranch = JSON.parse(repoJson).default_branch || "main";
         } catch {
           targetBranch = "main";
         }
       }
-      const result = execFileSync("glab", [
-        "api", `projects/${encodedRepo}/merge_requests`,
-        "-X", "POST", "--hostname", host,
-        "-f", `source_branch=${branch}`,
-        "-f", `target_branch=${targetBranch}`,
-        "-f", `title=${title}`,
-        "-f", `description=${params.description || "Cuvee merge — accumulated changes from multiple agents."}`,
+      const body = params.description || "Cuvee merge — accumulated changes from multiple agents.";
+      const result = execFileSync(AOC, [
+        "pressoir", "open-pr",
+        "--repo", repo,
+        "--src", branch,
+        "--dst", targetBranch,
+        "--title", title,
+        "--body", body,
       ], { encoding: "utf8" });
       const data = JSON.parse(result);
-      const mrUrl = data.web_url || `https://${host}/${repo}/-/merge_requests/${data.iid}`;
+      const mrUrl = data.WebURL || "";
+      const mrNumber: number = data.Number || 0;
       // Register MR in watcher for auto-merge + notification on merge
       try {
-        execFileSync(AOC, ["track-mr", "--session", `cuvee-${branch.replace(/\//g, "-")}`, "--project", project, "--repo", repo, "--mr", String(data.iid)], { encoding: "utf8" });
+        execFileSync(AOC, ["track-mr", "--session", `cuvee-${branch.replace(/\//g, "-")}`, "--project", project, "--repo", repo, "--mr", String(mrNumber)], { encoding: "utf8" });
       } catch {}
-      return { content: [{ type: "text" as const, text: `Opened MR !${data.iid}: ${mrUrl}` }], details: undefined };
+      const prLabel = resolveVigneProvider(project) === "github" ? `PR #${mrNumber}` : `MR !${mrNumber}`;
+      return { content: [{ type: "text" as const, text: `Opened ${prLabel}: ${mrUrl}` }], details: undefined };
     } catch (e: any) {
       return { content: [{ type: "text" as const, text: `Failed: ${e.stderr || e.message}` }], details: undefined };
     }
@@ -1773,7 +1769,7 @@ const openCuveeMRTool = defineTool({
 const commentMrTool = defineTool({
   name: "comment_mr",
   label: "Comment on MR (direct a vendangeur)",
-  description: "Post a comment on a merge request to direct the vendangeur handling it. A plain glab comment is ignored by the vendangeur (the conductor shares the vendangeur's GitLab identity); this one is marked so the mr-watcher forwards it to the vendangeur as review feedback. The MR must be tracked (vendangeurs call track_mr when they open an MR). Use this for visible, auditable MR-thread direction; use send_message for out-of-band instructions.",
+  description: "Post a comment on a merge request to direct the vendangeur handling it. A plain pressoir comment posted by the conductor user is ignored by the vendangeur (conductor and worker share the same git host identity); this one is marked so the mr-watcher forwards it to the vendangeur as review feedback. The MR must be tracked (vendangeurs call track_mr when they open an MR). Use this for visible, auditable MR-thread direction; use send_message for out-of-band instructions.",
   parameters: Type.Object({
     project: Type.String({ description: "Vigne/project name from vignes.yaml" }),
     mr: Type.Number({ description: "Merge request IID (number)" }),
@@ -1784,15 +1780,15 @@ const commentMrTool = defineTool({
       const { execFileSync } = require("node:child_process");
       const repo = resolveProjectRepo(params.project);
       if (!repo) return { content: [{ type: "text" as const, text: `Project "${params.project}" not found in vignes.yaml` }], details: undefined };
-      const encodedRepo = encodeURIComponent(repo);
-      const host = gitlabHost();
       const body = `${params.body}\n\n${CONDUCTOR_MARKER}`;
-      execFileSync("glab", [
-        "api", `projects/${encodedRepo}/merge_requests/${params.mr}/notes`,
-        "-X", "POST", "--hostname", host,
-        "-f", `body=${body}`,
+      execFileSync(AOC, [
+        "pressoir", "comment-pr",
+        "--repo", repo,
+        "--number", String(params.mr),
+        "--body", body,
       ], { encoding: "utf8" });
-      return { content: [{ type: "text" as const, text: `Commented on MR !${params.mr} (${params.project}) — the vendangeur will receive it as review feedback.` }], details: undefined };
+      const prLabel = resolveVigneProvider(params.project) === "github" ? `PR #${params.mr}` : `MR !${params.mr}`;
+      return { content: [{ type: "text" as const, text: `Commented on ${prLabel} (${params.project}) — the vendangeur will receive it as review feedback.` }], details: undefined };
     } catch (e: any) {
       return { content: [{ type: "text" as const, text: `Failed: ${e.stderr || e.message}` }], details: undefined };
     }
@@ -1810,7 +1806,7 @@ const listWorkersTool = defineTool({
       return { content: [{ type: "text" as const, text: "No vendangeurs running" }], details: undefined };
     }
     const lines = workers.map((w) => {
-      const mr = w.mr ? `MR !${w.mr}` : "—";
+      const mr = w.mr ? (w.pressoir === "github" ? `PR #${w.mr}` : `MR !${w.mr}`) : "—";
       return `${w.name} | ${w.project} | ${mr} | ${w.status}`;
     });
     return { content: [{ type: "text" as const, text: `Session | Project | MR | Status\n${lines.join("\n")}` }], details: undefined };
@@ -1923,6 +1919,38 @@ function buildFallbackReport(): string | null {
     fmt("pending gates:", pendingGates),
     `current focus:\n  ${focus}`,
   ].join("\n");
+}
+
+// handleMaitreNeedsReview — maître-only. On a needs_review notification from the
+// daemon watcher: deliver a structured review prompt to the maître LLM so it can
+// inspect the diff and post a signed review comment.
+// The maître NEVER approves automatically — approval is a human or forge-side act.
+// `aoc pressoir approve-pr` remains available as a manual CLI tool for operators
+// acting on explicit instruction, but is not invoked from this automatic path.
+function handleMaitreNeedsReview(data: { mr?: number; project?: string; repo?: string; url?: string; sha?: string; session?: string }): void {
+  if (!IS_MAITRE) return;
+  const { mr, project, repo, url, sha, session } = data;
+  if (!mr || !project || !repo) return;
+  const diffUrl = url ? `${url}/diffs` : "(url unavailable)";
+  const shaLine = sha ? `\nSHA: ${sha}` : "";
+  const sessionLine = session ? `\nVendangeur session: ${session}` : "";
+  const prompt = `[needs-review] MR !${mr} on ${project} is green and ready for your review as the owning maître.${shaLine}${sessionLine}
+Diff: ${diffUrl}
+
+Please review the changes:
+1. Use \`aoc pressoir get-pr-changes --repo ${repo} --number ${mr}\` to list changed files.
+2. Use \`aoc pressoir list-pr-notes --repo ${repo} --number ${mr}\` to read existing review comments.
+3. Read the relevant changed files to understand the impact.
+4. Post a signed review comment via \`aoc pressoir comment-pr --repo ${repo} --number ${mr} --body "<your review>\n\n🍇 Reviewed by the ${PARCELLE} maître"\`.
+
+Do NOT approve the MR. Approval is the human owner's or forge's responsibility.
+Be thorough but concise.`;
+  try {
+    if (piRef) piRef.sendUserMessage(prompt, { deliverAs: "followUp" });
+    require("node:fs").appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-review] LLM turn triggered for MR !${mr} on ${project} (sha=${sha ?? ""})\n`);
+  } catch (e: any) {
+    try { require("node:fs").appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-review] error triggering LLM: ${e.message}\n`); } catch {}
+  }
 }
 
 // handleMaitreReportRequest — maître-only. On a report-request notification:
@@ -2172,6 +2200,11 @@ function getVignes(): Record<string, Record<string, string>> {
   return _vignesCache!;
 }
 
+function resolveVigneProvider(project: string): string {
+  const vignes = getVignes();
+  return vignes[project]?.pressoir || "gitlab";
+}
+
 function resolveProjectRepo(project: string): string {
   const vignes = getVignes();
   return vignes[project]?.repo || "";
@@ -2230,12 +2263,13 @@ const createIssueTool = defineTool({
           const linked: string[] = [];
           for (const targetIid of targets) {
             try {
-              execFileSync("glab", [
-                "api", `projects/${encodeURIComponent(repo)}/issues/${number}/links`,
-                "--hostname", gitlabHost(), "--method", "POST",
-                "-f", `target_project_id=${repo}`,
-                "-f", `target_issue_iid=${targetIid}`,
-                "-f", "link_type=blocks",
+              execFileSync(AOC, [
+                "pressoir", "link-issues",
+                "--repo", repo,
+                "--number", String(number),
+                "--target-repo", repo,
+                "--target-number", String(targetIid),
+                "--link-type", "blocks",
               ], { encoding: "utf8", timeout: 15_000 });
               linked.push(`#${targetIid}`);
             } catch {}
@@ -2270,12 +2304,13 @@ const linkIssuesTool = defineTool({
       const targetRepo = targetProject === params.project ? sourceRepo : resolveProjectRepo(targetProject);
       if (!targetRepo) return { content: [{ type: "text" as const, text: `Failed: project '${targetProject}' not found in vignes.yaml` }], details: undefined };
       const linkType = params.link_type || "blocks";
-      execFileSync("glab", [
-        "api", `projects/${encodeURIComponent(sourceRepo)}/issues/${params.issue}/links`,
-        "--hostname", gitlabHost(), "--method", "POST",
-        "-f", `target_project_id=${sourceRepo}`,
-        "-f", `target_issue_iid=${params.target_issue}`,
-        "-f", `link_type=${linkType}`,
+      execFileSync(AOC, [
+        "pressoir", "link-issues",
+        "--repo", sourceRepo,
+        "--number", String(params.issue),
+        "--target-repo", targetRepo,
+        "--target-number", String(params.target_issue),
+        "--link-type", linkType,
       ], { encoding: "utf8", timeout: 15_000 });
       const targetLabel = targetProject === params.project ? `#${params.target_issue}` : `${targetProject}#${params.target_issue}`;
       return { content: [{ type: "text" as const, text: `Linked ${params.project}#${params.issue} ${linkType.replace(/_/g, " ")} ${targetLabel}` }], details: undefined };
@@ -2392,7 +2427,8 @@ const trackMRTool = defineTool({
       const { execFileSync } = require("node:child_process");
       const repo = resolveProjectRepo(project);
       const result = execFileSync(AOC, ["track-mr", "--session", session, "--project", project, "--repo", repo, "--mr", String(mr)], { encoding: "utf8" });
-      return { content: [{ type: "text" as const, text: result.trim() || `Tracking MR !${mr} on ${project}` }], details: undefined };
+      const prLabel2 = resolveVigneProvider(project) === "github" ? `PR #${mr}` : `MR !${mr}`;
+      return { content: [{ type: "text" as const, text: result.trim() || `Tracking ${prLabel2} on ${project}` }], details: undefined };
     } catch (e: any) {
       return { content: [{ type: "text" as const, text: `Failed: ${e.stderr || e.message}` }], details: undefined };
     }
@@ -2756,7 +2792,7 @@ class DashboardComponent {
       for (const wr of workers) {
         const icons: Record<string, string> = { working: `${YELLOW}✽${RESET}`, idle: `🍷`, completed: `${GREEN}✓${RESET}`, stopped: `${RED}✗${RESET}` };
         const icon = icons[wr.status] || "?";
-        const mr = wr.mr ? `MR !${wr.mr}` : "—";
+        const mr = wr.mr ? (wr.pressoir === "github" ? `PR #${wr.mr}` : `MR !${wr.mr}`) : "—";
         const statusColor = wr.status === "working" ? YELLOW : wr.status === "idle" ? GREEN : RED;
         lines.push(this.padLine(`${icon} ${wr.name.padEnd(24)} ${wr.project.padEnd(16)} ${mr.padEnd(10)} ${statusColor}${wr.status}${RESET}`, w));
       }
@@ -3023,8 +3059,8 @@ function formatPendingEvent(e: PendingEvent): string {
   if (e.type === "schedule_spawned") return `${time}  ${GREEN}spawned${RESET}    ${name} → ${project}`;
   if (e.type === "schedule_skipped") return `${time}  ${DIM}skipped${RESET}    ${name} (${e.data.reason || "poll not met"})`;
   if (e.type === "schedule_failed") return `${time}  ${RED}failed${RESET}     ${name}: ${(e.data.error || "").slice(0, 40)}`;
-  if (e.type === "needs_approval") return `${time}  ${YELLOW}approval${RESET}   MR !${e.data.mr || "?"} on ${project}`;
-  if (e.type === "circuit_breaker") return `${time}  ${RED}breaker${RESET}    MR !${e.data.mr || "?"} on ${project} (${e.data.fail_count || "?"}x)`;
+  if (e.type === "needs_approval") return `${time}  ${YELLOW}approval${RESET}   ${e.data.pressoir === "github" ? `PR #${e.data.mr || "?"}` : `MR !${e.data.mr || "?"}`} on ${project}`;
+  if (e.type === "circuit_breaker") return `${time}  ${RED}breaker${RESET}    ${e.data.pressoir === "github" ? `PR #${e.data.mr || "?"}` : `MR !${e.data.mr || "?"}`} on ${project} (${e.data.fail_count || "?"}x)`;
   return `${time}  ${e.type.padEnd(10)} ${name}`;
 }
 
@@ -3328,7 +3364,7 @@ export default function pinard(pi: ExtensionAPI) {
       const icons: Record<string, string> = { working: "✽", idle: "🍷", completed: "✓", stopped: "✗" };
       const lines = workers.map((w) => {
         const icon = icons[w.status] || "?";
-        const mr = w.mr ? `MR !${w.mr}` : "—";
+        const mr = w.mr ? (w.pressoir === "github" ? `PR #${w.mr}` : `MR !${w.mr}`) : "—";
         return `${icon} ${w.name.padEnd(28)} ${w.project.padEnd(18)} ${mr.padEnd(10)} ${w.status}`;
       });
       const header = `  ${"Session".padEnd(28)} ${"Project".padEnd(18)} ${"MR".padEnd(10)} Status`;

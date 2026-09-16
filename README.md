@@ -141,7 +141,45 @@ Linux release bundles include the Node and Pi runtime. See
 [Getting Started](website/content/docs/getting-started.md) for both installation
 paths and exact prerequisites.
 
-### 2. Configure credentials
+### 2. Pull a container image (optional)
+
+Pre-built images are published to GitHub Container Registry on every release.
+No credentials are needed to pull public images.
+
+> **Note on `aoc`:** the `aoc` CLI and daemon run on your control host (laptop,
+> workstation, or CI runner) — not inside a container. Install them from the
+> source checkout or a Linux release bundle (see step 1). The images below are
+> for the **k8s-hosted services** only.
+
+| Image | Contents | Use |
+|---|---|---|
+| `ghcr.io/genentech/pinard` | webterm-gateway + memory services + static docs site | k8s deployment of the Pinard backend services |
+| `ghcr.io/genentech/pinard-webterm-gateway` | standalone web-terminal gateway only | lighter k8s deployment when memory services run elsewhere |
+
+```bash
+# k8s services image (webterm-gateway + memory services + static docs site)
+docker pull ghcr.io/genentech/pinard:latest
+
+# Standalone web-terminal gateway
+docker pull ghcr.io/genentech/pinard-webterm-gateway:latest
+```
+
+Run the standalone web-terminal gateway:
+
+```bash
+docker run --rm \
+  -e NATS_VIGNOBLE=myproject \
+  -e PINARD_NATS_URL=nats://nats.example.com:4222 \
+  -e PINARD_NATS_PASSWORD=… \
+  -p 8080:8080 \
+  ghcr.io/genentech/pinard-webterm-gateway:latest
+```
+
+> **Engram**: the memory backend ([Gentleman-Programming/engram](https://github.com/Gentleman-Programming/engram))
+> is a third-party binary not bundled in the Genentech images. Install it from
+> the upstream release page and run it separately, or mount it into the container.
+
+### 3. Configure credentials
 
 Pinard has no built-in hosts or credentials. Copy the template, provide a dedicated
 GitLab service account and NATS connection, then export the referenced secrets:
@@ -156,7 +194,7 @@ export PINARD_NATS_PASSWORD="…"
 
 See [Configuration](website/content/docs/configuration.md) for the complete schema.
 
-### 3. Create an estate and register a repository
+### 4. Create an estate and register a repository
 
 ```bash
 aoc init myproject --gitlab-host gitlab.example.com --gitlab-group mygroup
@@ -173,7 +211,7 @@ aoc daemon status
 `--auto-merge` to a vigne only when you explicitly want Pinard to merge eligible
 MRs automatically.
 
-### 4. Run work
+### 5. Run work
 
 Spawn a worker directly:
 

@@ -1,7 +1,7 @@
 ---
 title: Documentation
-ledger_synced_commit: b18ca4a578ea308a8aa905f8085e26cd6dd6b159
-ledger_synced_at: 2026-09-09
+ledger_synced_commit: b5183055324e2207e5519c15c3acb0adeaab6a80
+ledger_synced_at: 2026-09-16
 ---
 
 ## Orchestrate fleets of agents — reliably
@@ -23,7 +23,7 @@ Three pillars hold it up:
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/docs-estate-overview.jpg" alt="A sketched vineyard estate with several independent worker parcels connected to a central control house and a persistent cellar archive.">
+    <img src="/images/docs/docs-estate-overview.jpg" alt="A sketched vineyard estate with several independent worker parcels connected to a central control house and a persistent cellar archive.">
     <span class="doc-figure-label charcoal" style="--x: 50%; --y: 18%;">C · Central control</span>
     <span class="doc-figure-label doc-figure-label--desktop terracotta" style="--x: 22%; --y: 72%;">A · Agent parcels</span>
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 50%; --y: 78%;">M · Persistent memory</span>
@@ -44,6 +44,6 @@ smarter over time as it writes what it learns to memory.
 
 *One conductor. Many agents. One harvest.* 🍷
 
-New here? Start with the **[Overview](docs/overview/)**, then
-**[The Semi-Deterministic Loop](docs/semi-deterministic-loop/)** and
-**[Memory & Recall](docs/memory/)** — the ideas that make the rest cohere.
+New here? Start with the **[Overview](/docs/overview/)**, then
+**[The Semi-Deterministic Loop](/docs/semi-deterministic-loop/)** and
+**[Memory & Recall](/docs/memory/)** — the ideas that make the rest cohere.

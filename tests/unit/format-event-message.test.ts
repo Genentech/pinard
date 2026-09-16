@@ -240,4 +240,84 @@ describe("formatEventMessage", () => {
     const msg = formatEventMessage("mr_merged", "my-session-42", { mr: 1 });
     expect(msg).toBe("[agent-event] MR !1 on my-session-42 was merged.");
   });
+
+  // Provider-aware label tests (pressoir: github → PR #N; absent/gitlab → MR !N)
+  it("github: mr_merged uses PR #N label", () => {
+    const msg = formatEventMessage("mr_merged", "s1", {
+      mr: 42,
+      _project: "my-gh-repo",
+      pressoir: "github",
+    });
+    expect(msg).toBe("[agent-event] PR #42 on my-gh-repo was merged.");
+  });
+
+  it("github: mr_closed uses PR #N label", () => {
+    const msg = formatEventMessage("mr_closed", "s1", {
+      mr: 7,
+      _project: "my-gh-repo",
+      pressoir: "github",
+    });
+    expect(msg).toBe("[agent-event] PR #7 on my-gh-repo was closed.");
+  });
+
+  it("github: auto_merged uses PR #N label", () => {
+    const msg = formatEventMessage("auto_merged", "s1", {
+      mr: 99,
+      _project: "my-gh-repo",
+      pressoir: "github",
+    });
+    expect(msg).toBe("[agent-event] PR #99 on my-gh-repo was auto-merged.");
+  });
+
+  it("github: pipeline_failed uses PR #N label", () => {
+    const msg = formatEventMessage("pipeline_failed", "s1", {
+      mr: 12,
+      _project: "my-gh-repo",
+      pressoir: "github",
+      attempt: 1,
+      max: 5,
+      url: "https://github.com/org/repo/actions/runs/123",
+    });
+    expect(msg).toContain("PR #12");
+    expect(msg).not.toContain("MR !");
+  });
+
+  it("github: needs_approval uses PR #N label", () => {
+    const msg = formatEventMessage("needs_approval", "s1", {
+      mr: 55,
+      _project: "my-gh-repo",
+      pressoir: "github",
+      url: "https://github.com/org/repo/pull/55",
+    });
+    expect(msg).toContain("PR #55");
+    expect(msg).not.toContain("MR !");
+  });
+
+  it("github: review_comment uses PR #N label", () => {
+    const msg = formatEventMessage("review_comment", "s1", {
+      mr: 20,
+      _project: "my-gh-repo",
+      pressoir: "github",
+      message: "Please fix the null check",
+    });
+    expect(msg).toContain("PR #20");
+    expect(msg).not.toContain("MR !");
+  });
+
+  it("gitlab: mr_merged still uses MR !N label (unchanged)", () => {
+    const msg = formatEventMessage("mr_merged", "s1", {
+      mr: 113,
+      _project: "exo-cli",
+      pressoir: "gitlab",
+    });
+    expect(msg).toBe("[agent-event] MR !113 on exo-cli was merged.");
+  });
+
+  it("no pressoir field defaults to gitlab MR !N label", () => {
+    const msg = formatEventMessage("mr_merged", "s1", {
+      mr: 5,
+      _project: "legacy-repo",
+    });
+    expect(msg).toBe("[agent-event] MR !5 on legacy-repo was merged.");
+  });
 });

@@ -10,8 +10,10 @@ type WatchedMR struct {
 	LastNoteID        int    `yaml:"last_note_id"`
 	LastPipelineID    int    `yaml:"last_pipeline_id,omitempty"`
 	PipelineFailCount int    `yaml:"pipeline_fail_count,omitempty"`
-	ReviewPending     bool   `yaml:"review_pending,omitempty"`
-	NeedsApprovalNotified bool `yaml:"needs_approval_notified,omitempty"`
+	ReviewPending         bool   `yaml:"review_pending,omitempty"`
+	NeedsApprovalNotified bool   `yaml:"needs_approval_notified,omitempty"`
+	ReviewedSHA           string `yaml:"reviewed_sha,omitempty"`
+	ReviewNotified        bool   `yaml:"review_notified,omitempty"`
 	AutoMergeLabeled  bool   `yaml:"auto_merge_labeled,omitempty"`
 	State             string `yaml:"state,omitempty"`
 	MergedAt          string `yaml:"merged_at,omitempty"`

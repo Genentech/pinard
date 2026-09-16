@@ -11,7 +11,7 @@ vignoble's conductor.
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/remote-worker-boundaries-v3.jpg" alt="A sketched Pinard estate connects over one outbound NATS route to a remote stone vineyard research cellar containing an isolated worker sandbox, secrets stored only in RAM, an external persistent journal, and a terminal responder antenna.">
+    <img src="/images/docs/remote-worker-boundaries-v3.jpg" alt="A sketched Pinard estate connects over one outbound NATS route to a remote stone vineyard research cellar containing an isolated worker sandbox, secrets stored only in RAM, an external persistent journal, and a terminal responder antenna.">
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 12.1%; --y: 82.2%;">Pinard host</span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 46.2%; --y: 46%;">→ · Outbound NATS</span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 78%; --y: 75%;">K · Secrets stored in RAM</span>
@@ -198,5 +198,5 @@ as the tmux-backed responder. No tmux, no extra process: the worker's own PTY
 becomes the viewable/steerable terminal.
 
 For workers *with* tmux, run `aoc webterm-responder` on the remote host. In both
-cases use the [Web Terminal](docs/web-terminal/) to watch from a browser — no SSH
+cases use the [Web Terminal](/docs/web-terminal/) to watch from a browser — no SSH
 required.
