@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"github.com/Genentech/pinard/internal/gitlab"
 	"github.com/Genentech/pinard/internal/liveness"
 	"github.com/Genentech/pinard/internal/pnats"
+	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/Genentech/pinard/internal/session"
 	"github.com/Genentech/pinard/internal/watcher"
 	"github.com/spf13/cobra"
@@ -87,9 +89,17 @@ var spawnCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("--issue: invalid IID %q: %w", issueID, err)
 			}
-			gl := gitlab.NewClient(creds.GitLab.Host, creds.Token())
+			// Build Pressoir for the issue fetch.
+			pCfg := vb.ResolvePressoirConfig(vigne.Repo)
+			pr, prErr := pressoir.NewPressoir(pCfg, creds)
+			if prErr != nil {
+				pr = pressoir.NewGitLabAdapter(creds.GitLab.Host, creds.Token())
+			}
 			// Fetch the issue to get its description.
-			issue, err := gl.GetIssue(vigne.Repo, issueIID)
+			issue, err := pr.GetIssue(context.Background(), pressoir.RepoRefFromPath(vigne.Repo), issueIID)
+			// ResolveIssueContract uses *gitlab.Client for its internal note scan;
+			// construct it lazily only when we have an issue to check.
+			gl := gitlab.NewClient(creds.GitLab.Host, creds.Token())
 			if err != nil {
 				log.Printf("[spawn] cannot fetch issue %s #%d for capsule detection: %v", vigne.Repo, issueIID, err)
 				// Non-fatal: fall through without a contract.
@@ -98,7 +108,7 @@ var spawnCmd = &cobra.Command{
 				var cr watcher.ContractResult
 				const maxRetries = 3
 				for attempt := 1; attempt <= maxRetries; attempt++ {
-					cr = watcher.ResolveIssueContract(gl, vigne.Repo, issueIID, issue.Description)
+					cr = watcher.ResolveIssueContract(gl, vigne.Repo, issueIID, issue.Body)
 					if !cr.Transient {
 						break
 					}
@@ -245,6 +255,13 @@ var spawnCmd = &cobra.Command{
 		encodedRepo := url.PathEscape(repo)
 		host := creds.GitLab.Host
 
+		// Resolve pressoir adapter for provider-aware prompt guidance.
+		promptPCfg := vb.ResolvePressoirConfig(repo)
+		promptPR, promptPRErr := pressoir.NewPressoir(promptPCfg, creds)
+		if promptPRErr != nil {
+			promptPR = pressoir.NewGitLabAdapter(host, creds.Token())
+		}
+
 		var fullPrompt string
 		if processName != "" {
 			// IMPORTANT: this initial message triggers one LLM turn BEFORE the
@@ -256,7 +273,7 @@ var spawnCmd = &cobra.Command{
 			// real action via tasks (which carry their own context).
 			// GovernancePrompt is the single source of truth — also used by
 			// bin/pinard via `aoc governance-prompt` to keep both paths in sync.
-			fullPrompt = GovernancePrompt(processName, host)
+			fullPrompt = GovernancePrompt(processName)
 			// Issue-driven workers get the issue from the babysitter (fetch-issue
 			// task), so the initial turn needs NO context — keeping it context-free
 			// prevents the worker from acting on the issue before its first task.
@@ -266,21 +283,13 @@ var spawnCmd = &cobra.Command{
 				fullPrompt += fmt.Sprintf("\n\nBackground for the overall job (do NOT act on this until a task tells you to):\n%s", prompt)
 			}
 		} else {
+			workerGuidance := promptPR.WorkerGuidance(repo, host, encodedRepo, targetBranch, creds.GitLab.User, project, name)
 			fullPrompt = fmt.Sprintf(`%s
 
 Instructions:
-- glab mr create does not work because git remotes use ssh.%s but glab is authenticated to %s. To open MRs, use the API directly: glab api projects/%s/merge_requests -X POST --hostname %s -f source_branch=$(git branch --show-current) -f target_branch=%s -f title="your title" -f description="your description" -f assignee_id=$(glab api users -X GET --hostname %s -f username=%s 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['id'])" 2>/dev/null)
-- When you open an MR: (1) call track_mr with the MR number so review comments reach you, (2) run: aoc notify "[%s] Opened MR !<number> on %s: https://%s/%s/-/merge_requests/<number>"
-- When you finish a task or address review feedback, run: aoc notify "[%s] <summary of what you did>"
-- Leave comments on MRs/issues to document your work. Use: glab api projects/%s/merge_requests/<iid>/notes -X POST --hostname %s -f body="<comment>"
-- Comment on the MR when you start working, after each significant change, and when you finish.
-- CRITICAL: You MUST only work within your current working directory (worktree). NEVER access, search, or read files outside your project directory. Do not use find/ls/cat/cd with absolute paths like /home, /data, or ~ to search the filesystem. If you need files from other repos, use the GitLab API.`,
-				prompt,
-				host, host,
-				encodedRepo, host, targetBranch, host, creds.GitLab.User,
-				name, project, host, repo,
-				name,
-				encodedRepo, host,
+%s
+- CRITICAL: You MUST only work within your current working directory (worktree). NEVER access, search, or read files outside your project directory. Do not use find/ls/cat/cd with absolute paths like /home, /data, or ~ to search the filesystem. If you need files from other repos, use the pressoir API (aoc pressoir …).`,
+				prompt, workerGuidance,
 			)
 		}
 
@@ -416,6 +425,18 @@ Instructions:
 		if sshKey := creds.SSHKeyPath(); sshKey != "" {
 			envParts = append(envParts, fmt.Sprintf("GIT_SSH_COMMAND='ssh -i %s -o IdentitiesOnly=yes'", sshKey))
 		}
+		// GitHub repos: wire HTTPS PAT for git clone/push instead of SSH.
+		// GIT_CONFIG_COUNT/KEY/VALUE inject a per-process credential helper that
+		// supplies the PAT without writing it to any file on disk.
+		if promptPCfg.Provider() == "github" {
+			if ghToken := creds.GitHubToken(); ghToken != "" {
+				ghHost := creds.GitHubHost() // user-facing host, e.g. "github.com"
+				envParts = append(envParts, "PINARD_GITHUB_TOKEN='" + ghToken + "'")
+				envParts = append(envParts, "GIT_CONFIG_COUNT='1'")
+				envParts = append(envParts, fmt.Sprintf("GIT_CONFIG_KEY_0='url.https://x-access-token:%s@%s/.insteadOf'", ghToken, ghHost))
+				envParts = append(envParts, fmt.Sprintf("GIT_CONFIG_VALUE_0='https://%s/'", ghHost))
+			}
+		}
 		if creds.GitLab.User != "" {
 			envParts = append(envParts, fmt.Sprintf("PINARD_GITLAB_USER='%s'", creds.GitLab.User))
 		}
@@ -440,11 +461,24 @@ Instructions:
 		if authorEmail != "" {
 			envParts = append(envParts, fmt.Sprintf("GIT_AUTHOR_EMAIL='%s'", authorEmail))
 		}
-		if creds.GitLab.GitName != "" {
-			envParts = append(envParts, fmt.Sprintf("GIT_COMMITTER_NAME='%s'", creds.GitLab.GitName))
+		// Committer identity: GitHub provider uses github.git_name/git_email;
+		// GitLab uses gitlab.git_name/git_email. Fall back to the other provider's
+		// values so mixed vignobles don't silently omit committer attribution.
+		committerName := creds.GitLab.GitName
+		committerEmail := creds.GitLab.GitEmail
+		if promptPCfg.Provider() == "github" {
+			if creds.GitHub.GitName != "" {
+				committerName = creds.GitHub.GitName
+			}
+			if creds.GitHub.GitEmail != "" {
+				committerEmail = creds.GitHub.GitEmail
+			}
 		}
-		if creds.GitLab.GitEmail != "" {
-			envParts = append(envParts, fmt.Sprintf("GIT_COMMITTER_EMAIL='%s'", creds.GitLab.GitEmail))
+		if committerName != "" {
+			envParts = append(envParts, fmt.Sprintf("GIT_COMMITTER_NAME='%s'", committerName))
+		}
+		if committerEmail != "" {
+			envParts = append(envParts, fmt.Sprintf("GIT_COMMITTER_EMAIL='%s'", committerEmail))
 		}
 		if pass := creds.NATSPassword(); pass != "" {
 			envParts = append(envParts, fmt.Sprintf("PINARD_NATS_PASS='%s'", pass))
@@ -625,25 +659,25 @@ Instructions:
 // GovernancePrompt returns the no-op bootstrap prompt for a process worker.
 // This is the single source of truth used by both `aoc spawn` and `bin/pinard`
 // via `aoc governance-prompt`, so both paths always stay in sync.
-func GovernancePrompt(processName, host string) string {
+func GovernancePrompt(processName string) string {
 	return fmt.Sprintf(`You are a worker governed by a babysitter process (%s). Work is dispatched as tasks, ONE AT A TIME.
 
 You have NO task yet. Do NOT take any action now — do not read or change code, do not
-touch GitLab, do not claim/assign/label anything, do not open an MR. Reply only with
+touch the git host, do not claim/assign/label anything, do not open a pull request. Reply only with
 "ready" and wait. Your first task will arrive momentarily.
 
 STRICT step discipline (every task):
 - Do EXACTLY what the current task says — nothing more, nothing less.
-- Never anticipate or start later steps. claim, analyze, implement, test, open MR are
+- Never anticipate or start later steps. claim, analyze, implement, test, open pull request are
   each a SEPARATE task you'll be given in turn.
-- Never read/edit code, commit, push, or open an MR unless the CURRENT task says so.
+- Never read/edit code, commit, push, or open a pull request unless the CURRENT task says so.
   Claiming an issue means ONLY updating its labels/assignee, exactly as the task states.
 - When the current task is done, call task:post and STOP. Wait for the next task.
 - Do not use openspec, skills, or project-specific workflows — work only from the task.
 
-GitLab CLI: the API host is %s (preconfigured via $GITLAB_HOST). NEVER use
-ssh.%s — that is only the git push remote, not a glab API host. Do not run
-"git remote" to choose a host.`, processName, host, host)
+Git host CLI: use aoc pressoir … subcommands for all git host operations (pull requests,
+issues, comments). The $GITLAB_HOST environment variable is set when running against GitLab.
+Do not run "git remote" to choose a host.`, processName)
 }
 
 var governancePromptCmd = &cobra.Command{
@@ -651,11 +685,10 @@ var governancePromptCmd = &cobra.Command{
 	Short: "Print the no-op bootstrap governance prompt for a process worker",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		processName, _ := cmd.Flags().GetString("process")
-		host, _ := cmd.Flags().GetString("host")
 		if processName == "" {
 			return fmt.Errorf("--process is required")
 		}
-		fmt.Print(GovernancePrompt(processName, host))
+		fmt.Print(GovernancePrompt(processName))
 		return nil
 	},
 }
@@ -702,6 +735,5 @@ func init() {
 	rootCmd.AddCommand(spawnCmd)
 
 	governancePromptCmd.Flags().String("process", "", "Babysitter process name (required)")
-	governancePromptCmd.Flags().String("host", "", "GitLab host")
 	rootCmd.AddCommand(governancePromptCmd)
 }

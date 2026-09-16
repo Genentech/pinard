@@ -1,0 +1,148 @@
+name: Release
+
+# GitHub Actions release workflow — collapses the two GitLab release lineages.
+#
+# The GitLab pipeline has two distinct version lineages:
+#   - Image lineage (.image-version/.cz.toml, `image-$version` tags): bumped by
+#     `.bump-image` on code/infra paths (`*local-trigger-image-files`).
+#   - Chart lineage (root pyproject.toml, `v$version` tags): bumped by `.bump-chart`
+#     on changes to charts/**; drives Flux CD / olympus GitOps.
+#
+# A standalone GitHub repo ships neither Helm charts nor Flux, so there is no
+# meaningful chart/image split. This workflow collapses both lineages into a
+# single `v*` release: it runs `cz bump --yes` on the root pyproject.toml
+# (chart lineage config) and cuts a `v<version>` tag whenever code/infra paths
+# change — the same paths that trigger `.bump-image` on GitLab.
+#
+# What this does:
+#   1. `cz bump --yes` — commitizen reads conventional commits since the last tag,
+#      increments the semver in pyproject.toml, updates CHANGELOG.md, commits, and
+#      creates a `v<version>` tag.
+#   2. Push the bump commit + tag back to main.
+#   3. Create a GitHub Release from the new tag with the CHANGELOG entry as notes.
+#
+# Gaps vs the GitLab flow (documented, not faked):
+#   - `olympus-cd`: triggers Flux CD reconciliation on an internal Kubernetes cluster.
+#     This step depends on infrastructure (olympus, Flux) that is not reachable from
+#     GitHub Actions. See "Releasing on GitHub" in docs/github-setup.md for details.
+#   - `bump-chart` (chart-only changes): the GitLab flow has a separate job that bumps
+#     the Helm chart version on changes to charts/**. That path is not mirrored here
+#     because the public GitHub mirror does not ship internal Helm charts.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "pi-extension/**"
+      - "bin/**"
+      - "processes/**"
+      - "website/**"
+      - "Makefile"
+      - "install"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: write   # push bump commit + tag; create GitHub Release
+
+# One release at a time. Do NOT cancel-in-progress — a partial cz bump that was
+# interrupted would leave pyproject.toml and CHANGELOG.md in an inconsistent state.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Version bump & release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history required: commitizen walks the log back to the last tag to
+          # determine the version increment (major/minor/patch).
+          fetch-depth: 0
+          # Use a PAT when available so the push can trigger downstream CI
+          # (GITHUB_TOKEN pushes are intentionally excluded from workflow triggers).
+          # Fall back to GITHUB_TOKEN for repositories where no PAT is configured.
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install commitizen
+        run: pip install commitizen
+
+      - name: Bump version (cz bump)
+        id: cz
+        run: |
+          # --yes: non-interactive; auto-detects increment from conventional commits.
+          # Writes pyproject.toml (version_provider = pep621), CHANGELOG.md, and
+          # creates a `v<version>` annotated tag.
+          cz bump --yes
+          echo "version=$(cz version --project)" >> "$GITHUB_OUTPUT"
+
+      - name: Push bump commit and tag
+        run: |
+          git push origin main
+          git push origin "v${{ steps.cz.outputs.version }}"
+
+      - name: Extract changelog entry
+        id: changelog
+        run: |
+          VERSION="${{ steps.cz.outputs.version }}"
+          # Pull out the section for the new version from CHANGELOG.md.
+          # cz writes headings like "## v0.60.0 (2026-09-15)".
+          python3 - <<'EOF'
+          import re, sys
+          version = "${{ steps.cz.outputs.version }}"
+          with open("CHANGELOG.md") as f:
+              text = f.read()
+          # Match the section for this version up to the next "## " heading.
+          pattern = rf"(## v{re.escape(version)}.*?)(?=\n## |\Z)"
+          m = re.search(pattern, text, re.DOTALL)
+          if not m:
+              sys.exit(0)  # No entry found — release without body
+          entry = m.group(1).strip()
+          with open("/tmp/release-notes.md", "w") as f:
+              f.write(entry)
+          EOF
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.cz.outputs.version }}"
+          NOTES_FILE="/tmp/release-notes.md"
+          if [[ -s "$NOTES_FILE" ]]; then
+            gh release create "v${VERSION}" \
+              --title "v${VERSION}" \
+              --notes-file "$NOTES_FILE"
+          else
+            gh release create "v${VERSION}" \
+              --title "v${VERSION}" \
+              --generate-notes
+          fi
+
+      # ── olympus-cd (GitOps trigger) ──────────────────────────────────────────
+      # TODO: The GitLab flow runs an `olympus-cd` job after release that amends
+      # the app GitRepository watched by Flux CD, triggering a Kubernetes rollout.
+      # This step depends on internal infrastructure (olympus, Flux, cluster
+      # credentials) that is not reachable from GitHub Actions.
+      #
+      # To wire this up for a self-hosted deployment:
+      #   1. Expose a webhook or API endpoint that the Actions runner can reach.
+      #   2. Store the endpoint URL + auth token as repository secrets.
+      #   3. Replace this comment with a `curl` or `gh` call to that endpoint.
+      #
+      # See "Releasing on GitHub — olympus-cd gap" in docs/github-setup.md.

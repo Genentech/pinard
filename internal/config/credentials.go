@@ -20,6 +20,18 @@ type GitLabConfig struct {
 	GitEmail      string `yaml:"git_email"`
 }
 
+// GitHubConfig holds the GitHub identity used by the GitHub pressoir adapter.
+// TokenEnv names the environment variable holding a fine-grained PAT with
+// repo + contents/pull_requests/issues/checks scopes.
+type GitHubConfig struct {
+	Host     string `yaml:"host,omitempty"`      // default "github.com"
+	User     string `yaml:"user,omitempty"`      // bot/service account username
+	TokenEnv string `yaml:"token_env,omitempty"` // env var holding the PAT
+	SSHKey   string `yaml:"ssh_key,omitempty"`
+	GitName  string `yaml:"git_name,omitempty"`
+	GitEmail string `yaml:"git_email,omitempty"`
+}
+
 type NATSConfig struct {
 	URL         string `yaml:"url"`
 	User        string `yaml:"user"`
@@ -83,12 +95,29 @@ type WebtermAuthConfig struct {
 
 type Credentials struct {
 	GitLab  GitLabConfig  `yaml:"gitlab"`
+	GitHub  GitHubConfig  `yaml:"github"`
 	NATS    NATSConfig    `yaml:"nats"`
 	Engram  EngramConfig  `yaml:"engram"`
 	Webterm WebtermConfig `yaml:"webterm"`
 	// Owner is the human tenant of this vignoble (used for web-terminal operator
 	// authorization). Defaults to NATS.User when empty. See WebtermOwner.
 	Owner string `yaml:"owner"`
+}
+
+// GitHubToken returns the GitHub PAT from the env var named in GitHubConfig.TokenEnv.
+func (c *Credentials) GitHubToken() string {
+	if c.GitHub.TokenEnv == "" {
+		return ""
+	}
+	return os.Getenv(c.GitHub.TokenEnv)
+}
+
+// GitHubHost returns the effective GitHub host, defaulting to "github.com".
+func (c *Credentials) GitHubHost() string {
+	if c.GitHub.Host != "" {
+		return c.GitHub.Host
+	}
+	return "github.com"
 }
 
 func (c *Credentials) Token() string {

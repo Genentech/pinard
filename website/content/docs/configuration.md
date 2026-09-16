@@ -13,7 +13,7 @@ Pinard reads two kinds of config: **machine-level secrets** in `~/.config/pinard
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/configuration-flow-v3.jpg" alt="A two-panel configuration diagram. The machine-scope panel has three direct, non-crossing lanes from credentials to the daemon, conductor, and vendangeur. The vignoble-scope panel repeats those three direct lanes from vignoble files to every role.">
+    <img src="/images/docs/configuration-flow-v3.jpg" alt="A two-panel configuration diagram. The machine-scope panel has three direct, non-crossing lanes from credentials to the daemon, conductor, and vendangeur. The vignoble-scope panel repeats those three direct lanes from vignoble files to every role.">
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 25%; --y: 7%;">H · Machine scope</span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 75%; --y: 7%;">V · Vignoble config → every role</span>
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 35%; --y: 37%;">Daemon · services & identity</span>
@@ -47,18 +47,28 @@ gitlab:
   git_name: Pinard
   git_email: pinard-bot@example.com
 
+# GitHub identity — required when any vigne uses provider: github
+github:
+  host: github.com                   # default; use your GHE hostname for GitHub Enterprise
+  user: pinard-bot                   # GitHub username of the service account
+  token_env: PINARD_GITHUB_TOKEN     # env var holding a fine-grained PAT
+  git_name: Pinard
+  git_email: pinard-bot@users.noreply.github.com
+
 nats:
   url: wss://nats.example.com
   user: lelongs
   password_env: PINARD_NATS_PASSWORD
 ```
 
+The `github:` block is only required when at least one vigne uses `provider: github` (see [Pressoir — git host](#pressoir--git-host) below). See [GitHub Setup](/docs/github-setup/) for the full onboarding guide including fine-grained PAT permissions.
+
 `owner_token_env` is the env var holding the **human operator's** GitLab personal access
 token (PAT). It is separate from the bot token (`token_env`) and is used in two places:
 
 1. **Owner gate** — when the conductor's `spawn_agent` tool assigns an issue, it uses the
    owner token so the assignment note is authored by *you* (not the bot), which Pinard
-   then recognises as owner approval. See [The SWE Process — Owner Gate](docs/swe-process/#owner-gate-security).
+   then recognises as owner approval. See [The SWE Process — Owner Gate](/docs/swe-process/#owner-gate-security).
 2. **`aoc env-exports --role conductor`** — the owner token is emitted **only** for the
    conductor role and is never passed to vendangeur workers, preventing PAT leakage to
    LLM-driven processes.
@@ -73,11 +83,11 @@ detached daemon sources on start.
 > config — you directed the work) but committed by the *service account*
 > (`GIT_COMMITTER_*` from `credentials.yaml` — it pushed).
 
-The optional `webterm:` block configures the [Web Terminal](docs/web-terminal/).
+The optional `webterm:` block configures the [Web Terminal](/docs/web-terminal/).
 
 ### Buddy Capsule (optional)
 
-The [Buddy Capsule protocol](docs/capsules/) is gated behind a build tag and requires
+The [Buddy Capsule protocol](/docs/capsules/) is gated behind a build tag and requires
 an external Mnemosyne service. If your `aoc` binary was built with `-tags capsule`, set
 the Mnemosyne base URL in `~/.config/pinard/env` (sourced by the daemon at start):
 
@@ -186,12 +196,13 @@ The same information appears as an **Engram** panel in `aoc dashboard` (refreshe
 
 ## `vignes.yaml`
 
-The per-vignoble registry: GitLab defaults, models, and the vignes themselves.
+The per-vignoble registry: defaults, models, and the vignes themselves.
 
 ```yaml
 gitlab_host: gitlab.com
 gitlab_group: exohub
 auto_merge: false             # optional; off by default (humans merge). Override per-vigne.
+auto_review: true             # optional; on by default (maître reviews every green MR). Override per-vigne.
 
 models:
   conductor:
@@ -213,18 +224,107 @@ vignes:
 | Flag | Effect |
 |------|--------|
 | `path` | Local checkout path for the repo |
-| `repo` | GitLab project (`group/name`) |
-| `auto_merge` | Opt-in: auto-merge MRs when approved, pipeline green, no unresolved threads. **Off by default** — leave unset and merge manually. |
+| `repo` | Project path (`group/name` for GitLab; `owner/name` for GitHub) |
+| `default_branch` | Target branch for PRs/MRs; defaults to `main` |
+| `auto_merge` | Opt-in: auto-merge when approved, CI green, no unresolved threads. **Off by default** |
+| `auto_review` | Opt-out: the owning maître reviews every green non-draft MR and posts a signed comment. **On by default**. Approval remains a human/forge responsibility. |
 | `monitor_post_merge` | After merge, watch the main branch + any bump/tag pipeline and notify on pass/fail |
 | `model.id` | Override the worker model for this vigne |
+| `pressoir` | Per-vigne pressoir override (see below) |
 
 Edit `vignes.yaml` directly, or use `aoc add vigne` and `aoc config set`. The daemon
 hot-reloads on change.
 
+## Pressoir — git host
+
+The **pressoir** abstraction is Pinard's git-host seam. By default every vigne uses
+GitLab. To use GitHub — or a GitHub Enterprise instance — configure the `pressoir:`
+block at the vignoble level, or override it per vigne.
+
+### `PressoirConfig` fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | `gitlab` \| `github` | `gitlab` | Which git host adapter to use |
+| `host` | string | provider default | API hostname override (`github.com` or a GHE host; Pinard maps to the correct API base) |
+| `org` | string | — | GitHub org or GitLab group (used when creating repos or resolving references) |
+| `token_env` | string | — | Env var holding the PAT/token for this pressoir scope |
+
+### Precedence
+
+Pinard resolves the effective pressoir config using this priority order:
+
+1. **Per-vigne `pressoir:`** — a `pressoir:` block inside a `vignes:` entry
+2. **Vignoble-level `pressoir:`** — a `pressoir:` block at the top of `vignes.yaml`
+3. **Default** — `provider: gitlab`, inheriting `gitlab_host` and `gitlab_group`
+
+### Examples
+
+#### Vignoble-level GitHub default
+
+All vignes in this vignoble use GitHub unless overridden:
+
+```yaml
+# vignes.yaml
+pressoir:
+  provider: github
+  org: my-github-org
+
+vignes:
+  my-api:
+    path: ~/my-api
+    repo: my-github-org/my-api
+    default_branch: main
+```
+
+#### Mixed vignoble (GitLab default, one GitHub vigne)
+
+```yaml
+# vignes.yaml
+gitlab_host: gitlab.example.com
+gitlab_group: mygroup
+
+vignes:
+  gl-service:                     # uses the default gitlab pressoir
+    path: ~/gl-service
+    repo: mygroup/gl-service
+
+  gh-lib:                         # overrides to github for this vigne only
+    path: ~/gh-lib
+    repo: my-org/gh-lib
+    default_branch: main
+    pressoir:
+      provider: github
+      org: my-org
+```
+
+#### GitHub Enterprise
+
+```yaml
+# vignes.yaml
+pressoir:
+  provider: github
+  host: github.example.com        # GHE hostname; Pinard maps to https://github.example.com/api/v3
+  org: my-enterprise-org
+
+vignes:
+  enterprise-repo:
+    path: ~/enterprise-repo
+    repo: my-enterprise-org/enterprise-repo
+    default_branch: main
+```
+
+> **Host mapping.** Users always set `host` to the *git* hostname — `github.com` or a
+> GHE hostname — not the API URL. Pinard maps `github.com → api.github.com` and
+> `<ghe-host> → https://<ghe-host>/api/v3` internally.
+
+See [GitHub Setup](/docs/github-setup/) for the full onboarding guide (PAT permissions,
+branch protection, auto-merge setup, and capability differences vs GitLab).
+
 ## `schedules.yaml`
 
 Cron-based agent spawns. Managed with `aoc add schedule` / `aoc unschedule`, or edited
-directly. See [Scheduling](docs/scheduling/).
+directly. See [Scheduling](/docs/scheduling/).
 
 ```yaml
 schedules:

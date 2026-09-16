@@ -484,3 +484,70 @@ func TestSpawnIfApproved_LabelAbsentNoError(t *testing.T) {
 		t.Error("expected spawn to succeed even when label was already absent")
 	}
 }
+
+func TestIssueWatcher_UserForRepo_GitHubVigne(t *testing.T) {
+	w := &IssueWatcher{
+		Creds: &config.Credentials{
+			GitLab: config.GitLabConfig{User: "gitlab-bot"},
+			GitHub: config.GitHubConfig{User: "github-bot"},
+		},
+		Vignoble: &config.Vignoble{
+			Config: &config.VignobleConfig{
+				GitLabHost: "gitlab.example.com",
+				Vignes: map[string]config.Vigne{
+					"myrepo": {
+						Repo: "myorg/myrepo",
+						Pressoir: config.PressoirConfig{
+							ProviderName: "github",
+						},
+					},
+				},
+			},
+		},
+		User: "gitlab-bot",
+	}
+
+	got := w.userForRepo("myorg/myrepo")
+	if got != "github-bot" {
+		t.Errorf("userForRepo for github vigne: want %q, got %q", "github-bot", got)
+	}
+}
+
+func TestIssueWatcher_UserForRepo_GitLabVigne(t *testing.T) {
+	w := &IssueWatcher{
+		Creds: &config.Credentials{
+			GitLab: config.GitLabConfig{User: "gitlab-bot"},
+			GitHub: config.GitHubConfig{User: "github-bot"},
+		},
+		Vignoble: &config.Vignoble{
+			Config: &config.VignobleConfig{
+				GitLabHost: "gitlab.example.com",
+				Vignes: map[string]config.Vigne{
+					"myrepo": {
+						Repo: "mygroup/myrepo",
+						// No Pressoir override — defaults to gitlab
+					},
+				},
+			},
+		},
+		User: "gitlab-bot",
+	}
+
+	got := w.userForRepo("mygroup/myrepo")
+	if got != "gitlab-bot" {
+		t.Errorf("userForRepo for gitlab vigne: want %q, got %q", "gitlab-bot", got)
+	}
+}
+
+func TestIssueWatcher_UserForRepo_NilCredsFallback(t *testing.T) {
+	w := &IssueWatcher{
+		Creds:    nil,
+		Vignoble: nil,
+		User:     "fallback-user",
+	}
+
+	got := w.userForRepo("any/repo")
+	if got != "fallback-user" {
+		t.Errorf("userForRepo with nil Creds: want %q, got %q", "fallback-user", got)
+	}
+}

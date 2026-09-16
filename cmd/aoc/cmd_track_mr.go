@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -8,8 +9,8 @@ import (
 
 	"github.com/Genentech/pinard/internal/config"
 	"github.com/Genentech/pinard/internal/git"
-	"github.com/Genentech/pinard/internal/gitlab"
 	"github.com/Genentech/pinard/internal/pnats"
+	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/Genentech/pinard/internal/session"
 	"github.com/Genentech/pinard/internal/state"
 	"github.com/Genentech/pinard/internal/webterm"
@@ -28,9 +29,9 @@ func shouldPostWebtermLink(hasKVRecord, isNewTracking bool, repo string) bool {
 	return hasKVRecord && isNewTracking && repo != ""
 }
 
-// webtermLinkAlreadyPosted reports whether any of the given notes already
+// webtermLinkAlreadyPosted reports whether any of the given comments already
 // contains the webterm-link marker, indicating the link was previously posted.
-func webtermLinkAlreadyPosted(notes []gitlab.Note) bool {
+func webtermLinkAlreadyPosted(notes []pressoir.Comment) bool {
 	for _, n := range notes {
 		if strings.Contains(n.Body, webtermNoteMarker) {
 			return true
@@ -274,27 +275,32 @@ var trackMRCmd = &cobra.Command{
 		// without auth (Phase 1) we fall back to the signed, expiring link.
 		if shouldPostWebtermLink(hasKVRecord, isNewTracking, repo) {
 			if credsErr == nil && creds.WebtermEnabled() && creds.WebtermPostLinks() {
-				gl := gitlab.NewClient(creds.GitLab.Host, creds.Token())
+				pCfg := vb.ResolvePressoirConfig(repo)
+				prClient, prErr := pressoir.NewPressoir(pCfg, creds)
+				if prErr != nil {
+					prClient = pressoir.NewGitLabAdapter(creds.GitLab.Host, creds.Token())
+				}
+				repoRef := pressoir.RepoRefFromPath(repo)
 				// Dedup: skip if the marker note already exists on this MR.
 				alreadyPosted := false
-				if existing, lerr := gl.ListMRNotes(repo, mr); lerr == nil {
+				if existing, lerr := prClient.ListPRNotes(context.Background(), repoRef, mr); lerr == nil {
 					alreadyPosted = webtermLinkAlreadyPosted(existing)
 				}
 				if alreadyPosted {
 					fmt.Printf("Terminal link already posted on MR !%d, skipping\n", mr)
 				} else {
-					var link, body string
+					var link, noteBody string
 					if creds.WebtermAuthEnabled() {
 						link = webterm.BuildUnsignedLink(creds.WebtermBaseURL(), webtermVignoble, webtermTarget)
-						body = fmt.Sprintf("%s\n🖥️ **Live terminal** (vendangeur `%s`, read-only — operator SSO):\n\n%s",
+						noteBody = fmt.Sprintf("%s\n🖥️ **Live terminal** (vendangeur `%s`, read-only — operator SSO):\n\n%s",
 							webtermNoteMarker, webtermTarget, link)
 					} else {
 						exp := time.Now().Add(creds.WebtermLinkTTL())
 						link = webterm.BuildLink(creds.WebtermBaseURL(), webtermVignoble, webtermTarget, exp, creds.WebtermLinkSecret())
-						body = fmt.Sprintf("%s\n🖥️ **Live terminal** (vendangeur `%s`, read-only, expires %s):\n\n%s",
+						noteBody = fmt.Sprintf("%s\n🖥️ **Live terminal** (vendangeur `%s`, read-only, expires %s):\n\n%s",
 							webtermNoteMarker, webtermTarget, exp.UTC().Format("2006-01-02 15:04 MST"), link)
 					}
-					if perr := gl.PostMRNote(repo, mr, body); perr != nil {
+					if perr := prClient.PostPRNote(context.Background(), repoRef, mr, noteBody); perr != nil {
 						fmt.Printf("Warning: failed to post terminal link on MR !%d: %v\n", mr, perr)
 					} else {
 						fmt.Printf("Posted terminal link on MR !%d\n", mr)

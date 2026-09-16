@@ -1,23 +1,31 @@
 ---
-title: The SWE Process (GitLab)
+title: The SWE Process
 weight: 40
 group: Applications
 ---
 
 The SWE process is Pinard's **reference loop** — a
-[semi-deterministic loop](docs/semi-deterministic-loop/) that turns a GitLab issue
-into a merged merge request: *issue → change → MR → review → merge → reap*. It is a
+[semi-deterministic loop](/docs/semi-deterministic-loop/) that turns an issue
+into a merged pull request: *issue → change → PR → review → merge → reap*. It is a
 complete, batteries-included application built on the engine — and a template for
 loops of your own.
 
 > This is **one process**, not the whole of Pinard. If your fleet does something
 > other than code review, you write a different [babysitter
-> process](docs/authoring-processes/); everything below is how this particular loop
+> process](/docs/authoring-processes/); everything below is how this particular loop
 > is wired.
+>
+> **GitHub and GitLab are both supported.** The loop runs identically on either git
+> host — Pinard's [pressoir abstraction](/docs/configuration/#pressoir--git-host)
+> handles the provider differences automatically. Set `pressoir.provider: github` in
+> `vignes.yaml` to use a GitHub-backed vigne; see the [GitHub Setup
+> guide](/docs/github-setup/) for PAT permissions and auto-merge configuration.
 
-## Setup — the Pinard GitLab account
+## Setup — the Pinard service account
 
-The SWE loop acts through a dedicated GitLab service account (role: **Developer**).
+The SWE loop acts through a dedicated service account on your git host.
+
+### GitLab setup
 
 | Action | API | Role |
 |--------|-----|------|
@@ -31,6 +39,19 @@ The SWE loop acts through a dedicated GitLab service account (role: **Developer*
 - **Branch protection** — the default branch should allow "Developers + Maintainers"
   to merge, otherwise Pinard can't [auto-merge](#auto-merge-optional).
 
+### GitHub setup
+
+See the **[GitHub Setup guide](/docs/github-setup/)** for full step-by-step
+instructions. Short summary:
+
+- Create a **fine-grained PAT** with scopes: Metadata (read), Contents (write), Pull
+  requests (write), Issues (write), Commit statuses (read), Actions (write), Workflows
+  (write).
+- No SSH key needed — Pinard authenticates `git push` over HTTPS using the PAT.
+- Enable **"Allow auto-merge"** in repo Settings → General → Pull Requests.
+- Gate auto-merge on **status checks** (not required approvals) — GitHub prevents a
+  bot from approving its own pull request.
+
 ## Trigger — assign an issue
 
 The daemon's **issue watcher** scans every vigne for open issues **assigned to the
@@ -41,8 +62,8 @@ context and labels the issue `in-progress`.
 ### Owner gate (security)
 
 Pinard only spawns vendangeurs for work the **vignoble owner** has authorized. This
-prevents any GitLab user with push access from spending your LLM quota by assigning
-issues to the Pinard bot.
+prevents any user with access to your git host from spending your LLM quota by
+assigning issues to the Pinard bot.
 
 An issue passes the gate when **either** is true:
 
@@ -63,8 +84,7 @@ auto-spawning happens at all.
 
 #### Configuring the gate
 
-Set `owner` in `credentials.yaml` to the GitLab username of the vignoble operator
-(typically your own account):
+Set `owner` in `credentials.yaml` to your username on the git host (GitLab or GitHub):
 
 ```yaml
 nats:
@@ -76,11 +96,11 @@ different owner (e.g. when the NATS user and GitLab owner differ), override it w
 `owner:` in the credentials file.
 
 To allow the conductor's `spawn_agent` tool to assign issues *as the owner* (so that
-assignment itself counts as approval), also configure `owner_token_env`:
+assignment itself counts as approval), configure `owner_token_env` on GitLab:
 
 ```yaml
 gitlab:
-  owner_token_env: PINARD_OWNER_GITLAB_TOKEN   # human operator's PAT
+  owner_token_env: PINARD_OWNER_GITLAB_TOKEN   # human operator's GitLab PAT
 ```
 
 When `PINARD_OWNER_GITLAB_TOKEN` is set, the conductor uses it for issue assignment
@@ -89,8 +109,12 @@ its own spawns without requiring a separate approval comment.
 
 > **Security note.** The owner token is **only** emitted for the conductor role
 > (`aoc env-exports --role conductor`). Workers receive the bot token only and can
-> never hold the operator's GitLab PAT — even if it is in the daemon's environment,
+> never hold the operator's PAT — even if it is in the daemon's environment,
 > `aoc spawn` passes workers an explicit, allowlisted environment.
+
+> **GitHub.** There is no separate `owner_token` for GitHub — the owner gate still
+> applies (via `nats.user`), but assignment-as-approval works only when the vignoble
+> owner assigns the issue themselves on GitHub.
 
 ### Labels that gate spawning
 
@@ -99,7 +123,7 @@ its own spawns without requiring a separate approval comment.
 | `blocked` | Skipped — no vendangeur spawned |
 | `pinard:discarded` | Skipped; if already spawned, its state resets so it can retry |
 | `pinard:awaiting-approval` | Held — owner hasn't approved yet; watcher re-checks each cycle. **Removed automatically** when the owner approves. |
-| `capsule:awaiting-funding` | Capsule-gated — contract detected but not yet funded; see [Buddy Capsules](docs/capsules/) |
+| `capsule:awaiting-funding` | Capsule-gated — contract detected but not yet funded; see [Buddy Capsules](/docs/capsules/) |
 
 **Retry:** add `pinard:discarded`, then remove it and re-assign — the watcher picks
 it up next cycle.
@@ -108,17 +132,17 @@ it up next cycle.
 
 | Label | Effect |
 |-------|--------|
-| `parcelle:<name>` | Route into a [parcelle](docs/orchestration/) (else the vigne's own bucket) |
+| `parcelle:<name>` | Route into a [parcelle](/docs/orchestration/) (else the vigne's own bucket) |
 | `target:<branch>` | Target a branch, e.g. `target:cuvee/data-service` (may contain `/`) |
 
 A parcelle can also claim an issue via its `parcelle.yaml`, which may set a
-`target_branch:` (the [cuvée](docs/orchestration/) strategy) without any label.
+`target_branch:` (the [cuvée](/docs/orchestration/) strategy) without any label.
 
 ## The loop — issue to MR
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/swe-process-lifecycle.jpg" alt="A sketched software-work lifecycle from an approved request through an isolated worker and merge-request watcher, with review and failure loops, to merge and worker cleanup.">
+    <img src="/images/docs/swe-process-lifecycle.jpg" alt="A sketched software-work lifecycle from an approved request through an isolated worker and merge-request watcher, with review and failure loops, to merge and worker cleanup.">
     <span class="doc-figure-label mustard" style="--x: 13%; --y: 38%;">Owner gate</span>
     <span class="doc-figure-label charcoal" style="--x: 16%; --y: 57%;">Vendangeur</span>
     <span class="doc-figure-label mustard" style="--x: 38%; --y: 41%;">MR handoff</span>
@@ -174,7 +198,7 @@ dispatched straight to the worker's inbox — including the exact
 ### Auto-merge (optional)
 
 **Off by default — a human merges.** When enabled via `auto_merge: true` in
-[`vignes.yaml`](docs/configuration/) (per-vigne or global), the watcher merges once
+[`vignes.yaml`](/docs/configuration/) (per-vigne or global), the watcher merges once
 **all** hold: pipeline **success**, at least one **approval**, **no unresolved
 threads**, and **not a Draft**. If unapproved, a `needs_approval` event goes to the
 conductor. With auto-merge off, none of this runs.
@@ -187,7 +211,7 @@ point that kills the tmux session and cleans up the worktree.
 
 ## See also
 
-- **[Authoring Processes](docs/authoring-processes/)** — write your own loop.
-- **[Orchestration & Parcelles](docs/orchestration/)** — group SWE work into workstreams.
-- **[Configuration](docs/configuration/)** — `auto_merge` and other toggles.
-- **[Buddy Capsules](docs/capsules/)** — let a colleague fund a vendangeur's quota.
+- **[Authoring Processes](/docs/authoring-processes/)** — write your own loop.
+- **[Orchestration & Parcelles](/docs/orchestration/)** — group SWE work into workstreams.
+- **[Configuration](/docs/configuration/)** — `auto_merge` and other toggles.
+- **[Buddy Capsules](/docs/capsules/)** — let a colleague fund a vendangeur's quota.

@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"github.com/Genentech/pinard/internal/gitlab"
 	"github.com/Genentech/pinard/internal/liveness"
 	"github.com/Genentech/pinard/internal/pnats"
+	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/Genentech/pinard/internal/session"
 	"github.com/Genentech/pinard/internal/state"
 )
@@ -39,9 +41,24 @@ type OrphanRecovery struct {
 	NATS     *pnats.Client
 	Session  session.Manager
 	MRState  *state.Store[state.MRWatcherState]
+	// Pressoir is the vignoble-default provider-neutral adapter (fallback when
+	// Resolver is nil or per-repo resolution fails).
+	Pressoir pressoir.Pressoir
+	// Resolver resolves the correct pressoir adapter per repo.
+	Resolver *PressoirResolver
+	// GitLab and GitLabIssues are retained for compatibility with tests that mock
+	// the narrower mrStateGetter/issueUpdater interfaces.
 	GitLab       mrStateGetter
 	GitLabIssues issueUpdater
 	retries      map[string]int // runID → retry count
+}
+
+// pressoirFor returns the pressoir adapter for the given repo path.
+func (o *OrphanRecovery) pressoirFor(repo string) pressoir.Pressoir {
+	if o.Resolver != nil {
+		return o.Resolver.For(repo)
+	}
+	return o.Pressoir
 }
 
 func (o *OrphanRecovery) Run() {
@@ -438,15 +455,23 @@ func (o *OrphanRecovery) isRunMRDone(runID string) bool {
 // authoritative guard against resurrecting a run whose MR a human closed — the
 // MR watcher deletes the tracked entry on close, so MRState no longer knows.
 func (o *OrphanRecovery) runMRState(runDir string) string {
-	if o.GitLab == nil {
-		return ""
-	}
 	mrIID := o.runMRIID(runDir)
 	if mrIID == 0 {
 		return ""
 	}
 	repo := o.runRepo(runDir)
 	if repo == "" {
+		return ""
+	}
+	// Use per-repo Pressoir adapter when available; fall back to the legacy mrStateGetter.
+	if p := o.pressoirFor(repo); p != nil {
+		pr, err := p.GetPR(context.Background(), pressoir.RepoRefFromPath(repo), mrIID)
+		if err != nil {
+			return ""
+		}
+		return pr.State
+	}
+	if o.GitLab == nil {
 		return ""
 	}
 	mr, err := o.GitLab.GetMR(repo, mrIID)

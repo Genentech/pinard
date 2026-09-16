@@ -10,7 +10,7 @@ This guide takes you from nothing to a running vignoble with a conductor.
 
 <figure class="doc-figure doc-figure--wide">
   <div class="doc-figure-visual">
-    <img src="images/docs/getting-started-journey-v2.jpg" alt="A six-stop sketched journey from a Pinard installation crate through credentials, estate creation, repository registration, daemon startup, and an open conductor control room.">
+    <img src="/images/docs/getting-started-journey-v2.jpg" alt="A six-stop sketched journey from a Pinard installation crate through credentials, estate creation, repository registration, daemon startup, and an open conductor control room.">
     <span class="doc-figure-label charcoal" style="--x: 8.3%; --y: 17.8%;">1</span>
     <span class="doc-figure-label charcoal" style="--x: 24.3%; --y: 17.8%;">2</span>
     <span class="doc-figure-label charcoal" style="--x: 41.5%; --y: 17.8%;">3</span>
@@ -107,8 +107,8 @@ export PINARD_GITLAB_TOKEN="glpat-xxxxx"
 export PINARD_NATS_PASSWORD="xxxxx"
 ```
 
-See [Configuration](docs/configuration/) for the full schema including optional blocks
-(`engram:`, `webterm:`, and the [Buddy Capsule](docs/capsules/) `PINARD_MNEMOSYNE_URL`).
+See [Configuration](/docs/configuration/) for the full schema including optional blocks
+(`engram:`, `webterm:`, and the [Buddy Capsule](/docs/capsules/) `PINARD_MNEMOSYNE_URL`).
 
 ## Create a vignoble
 
@@ -133,7 +133,7 @@ aoc add vigne my-api --path ~/my-api --repo mygroup/my-api
 
 This appends an entry to `vignes.yaml`. Repeat for every repo. (Add `--auto-merge` only if
 you want that vigne's MRs merged automatically — it's off by default; see
-[Configuration](docs/configuration/).)
+[Configuration](/docs/configuration/).)
 
 ## Run the daemon
 
@@ -221,7 +221,7 @@ pinard
 
 ## Next steps
 
-- [Orchestration & Parcelles](docs/orchestration/) — how the régisseur, maîtres, and
+- [Orchestration & Parcelles](/docs/orchestration/) — how the régisseur, maîtres, and
   vendangeurs divide work.
-- [The SWE Process](docs/swe-process/) — drive work from GitLab issues.
-- [CLI Reference](docs/cli-reference/) — the full `aoc` and `pinard` surface.
+- [The SWE Process](/docs/swe-process/) — drive work from GitLab issues.
+- [CLI Reference](/docs/cli-reference/) — the full `aoc` and `pinard` surface.

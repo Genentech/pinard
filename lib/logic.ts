@@ -45,6 +45,15 @@ export function buildDedupeKey(
   return `${sessionId}:${type}:${dedupeExtra}`;
 }
 
+function prRef(data: Record<string, any>): string {
+  if (data.mr == null) return "";
+  return data.pressoir === "github" ? `PR #${data.mr}` : `MR !${data.mr}`;
+}
+
+function prWord(data: Record<string, any>): string {
+  return data.pressoir === "github" ? "pull request" : "merge request";
+}
+
 export function formatEventMessage(
   type: string,
   sessionId: string,
@@ -52,7 +61,7 @@ export function formatEventMessage(
 ): string {
   const project = data._project || data.cwd?.split("/").pop() || sessionId;
   const sessionRef = data._agentSessionId || sessionId;
-  const mr = data.mr ? `MR !${data.mr}` : "";
+  const mr = prRef(data);
 
   if (type === "agent_idle") {
     return `[agent-event] Agent ${project} (${sessionRef}) is idle — finished working. Check its status and decide next steps.`;

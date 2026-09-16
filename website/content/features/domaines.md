@@ -15,7 +15,7 @@ Pinard's **Les Domaines** architecture extends this idea to computation: a singl
 
 ## The problem it solves
 
-The first piece is already here: a vendangeur no longer has to run on the conductor's machine. Because every component talks only over NATS, a worker can run on a **remote workstation or an HPC node** and still be spawned, streamed to the browser, and reaped like any local agent (see [Remote Workers](docs/remote-workers/) in The Craft). Les Domaines is the vision of making that a first-class, self-describing fabric.
+The first piece is already here: a vendangeur no longer has to run on the conductor's machine. Because every component talks only over NATS, a worker can run on a **remote workstation or an HPC node** and still be spawned, streamed to the browser, and reaped like any local agent (see [Remote Workers](/docs/remote-workers/) in The Craft). Les Domaines is the vision of making that a first-class, self-describing fabric.
 
 Some work simply cannot live on one machine:
 

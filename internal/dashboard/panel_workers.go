@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -91,7 +92,14 @@ func (w WorkerEntry) StatusText() string {
 	return fmt.Sprintf("%s %s", icon, label)
 }
 
-// kvUpdateMsg is sent when the KV watcher observes a change.
+// kvEntryMsg carries a single KV update (put, delete, or purge) from the
+// long-lived watcher goroutine to the Bubble Tea runtime.
+type kvEntryMsg struct {
+	entry nats.KeyValueEntry
+}
+
+// kvUpdateMsg is sent with the full worker list after the initial snapshot
+// has been collected.
 type kvUpdateMsg struct {
 	workers []WorkerEntry
 }
@@ -115,7 +123,11 @@ type WorkersPanel struct {
 	width     int
 	height    int
 
-	lastErr error
+	// kvCh is the channel shared between the long-lived watcher goroutine
+	// and the Bubble Tea runtime.  Nil until Init() starts the goroutine.
+	kvCh chan nats.KeyValueEntry
+
+	lastErr    error
 	lastUpdate time.Time
 }
 
@@ -168,16 +180,22 @@ func tableStyles() table.Styles {
 func (p *WorkersPanel) Title() string { return "🧺 Vendangeurs" }
 
 func (p *WorkersPanel) Init() tea.Cmd {
-	if p.kv != nil {
-		return p.watchKV()
+	if p.kv == nil || p.kvCh != nil {
+		return nil
 	}
-	return nil
+	p.kvCh = make(chan nats.KeyValueEntry, 64)
+	go p.runKVWatcher(p.kvCh)
+	return p.waitForKVEntry()
 }
 
 func (p *WorkersPanel) Update(msg tea.Msg) (Panel, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case kvEntryMsg:
+		p.applyKVEntry(msg.entry)
+		cmds = append(cmds, p.waitForKVEntry())
+
 	case kvUpdateMsg:
 		p.workers = msg.workers
 		p.lastUpdate = time.Now()
@@ -308,81 +326,82 @@ func (p *WorkersPanel) SetFocused(focused bool) {
 
 // ── KV watch ────────────────────────────────────────────────────────────────
 
-// watchKV starts a goroutine that watches the pinard-agents KV bucket and
-// sends kvUpdateMsg messages to the Bubble Tea runtime.
-func (p *WorkersPanel) watchKV() tea.Cmd {
-	return func() tea.Msg {
-		watcher, err := p.kv.WatchAll()
+// runKVWatcher is a long-lived goroutine (started once by Init) that maintains
+// a single WatchAll consumer for the panel's lifetime.  Every KV entry — both
+// the initial snapshot and subsequent live updates — is forwarded to ch.
+// A nil sentinel from watcher.Updates() (end-of-snapshot) is forwarded as-is
+// so the Bubble Tea side can detect the snapshot boundary.
+//
+// If the watcher's Updates() channel closes unexpectedly the goroutine sleeps
+// briefly and re-subscribes, keeping the same ch alive so the Bubble Tea
+// waitForKVEntry loop never needs to restart.
+//
+// Defense-in-depth: each watcher is created with a 10-minute context so that
+// any orphaned server-side ordered consumer auto-expires even if Stop() is
+// missed (e.g. over a flaky WSS connection).  The goroutine re-subscribes
+// transparently when the context expires.
+func (p *WorkersPanel) runKVWatcher(ch chan nats.KeyValueEntry) {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		watcher, err := p.kv.WatchAll(nats.Context(ctx))
 		if err != nil {
-			return kvErrorMsg{err: fmt.Errorf("KV watch: %w", err)}
+			cancel()
+			time.Sleep(5 * time.Second)
+			continue
 		}
-		defer watcher.Stop()
-
-		workers := map[string]WorkerEntry{}
-
 		for entry := range watcher.Updates() {
-			if entry == nil {
-				// nil signals end of initial values snapshot
-				break
-			}
-			we, ok := parseKVEntry(entry)
-			if !ok {
-				continue
-			}
-			if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-				delete(workers, entry.Key())
-			} else {
-				// Only keep workers for this vignoble
-				if p.vignoble == "" || we.vignoble == p.vignoble {
-					workers[entry.Key()] = we.WorkerEntry
-				}
-			}
+			ch <- entry
 		}
-
-		snapshot := sortedWorkers(workers)
-		// Return snapshot and re-subscribe for live updates
-		return kvUpdateMsg{workers: snapshot}
+		// Updates() channel closed — watcher expired or disconnected.
+		watcher.Stop()
+		cancel()
+		time.Sleep(time.Second)
 	}
 }
 
-// watchKVLive returns a tea.Cmd that watches for live updates after the
-// initial snapshot.  Call this from Update after receiving kvUpdateMsg.
-func (p *WorkersPanel) watchKVLive() tea.Cmd {
-	if p.kv == nil {
+// waitForKVEntry returns a tea.Cmd that blocks until the next entry arrives
+// on the shared channel, then wraps it in a kvEntryMsg.
+func (p *WorkersPanel) waitForKVEntry() tea.Cmd {
+	ch := p.kvCh
+	if ch == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		watcher, err := p.kv.WatchAll()
-		if err != nil {
-			return kvErrorMsg{err: err}
-		}
-		defer watcher.Stop()
-
-		workers := make(map[string]WorkerEntry)
-		// Rebuild from current state
-		for _, w := range p.workers {
-			workers[w.Key] = w
-		}
-
-		for entry := range watcher.Updates() {
-			if entry == nil {
-				continue
-			}
-			if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-				delete(workers, entry.Key())
-			} else {
-				we, ok := parseKVEntry(entry)
-				if !ok {
-					continue
-				}
-				if p.vignoble == "" || we.vignoble == p.vignoble {
-					workers[entry.Key()] = we.WorkerEntry
-				}
-			}
-			return kvUpdateMsg{workers: sortedWorkers(workers)}
-		}
-		return kvErrorMsg{err: fmt.Errorf("KV watcher closed")}
+		return kvEntryMsg{entry: <-ch}
 	}
+}
+
+// applyKVEntry applies a single KV entry from the watcher to the workers map.
+// A nil entry marks the end of the initial snapshot — the table is rebuilt at
+// that point so the first paint reflects the full initial state.
+func (p *WorkersPanel) applyKVEntry(entry nats.KeyValueEntry) {
+	if entry == nil {
+		// End-of-snapshot sentinel: rebuild and record time.
+		p.lastUpdate = time.Now()
+		p.lastErr = nil
+		p.rebuildTable()
+		return
+	}
+
+	// Build a lookup map from current slice.
+	workers := make(map[string]WorkerEntry, len(p.workers))
+	for _, w := range p.workers {
+		workers[w.Key] = w
+	}
+
+	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+		delete(workers, entry.Key())
+	} else {
+		we, ok := parseKVEntry(entry)
+		if ok && (p.vignoble == "" || we.vignoble == p.vignoble) {
+			workers[entry.Key()] = we.WorkerEntry
+		}
+	}
+
+	p.workers = sortedWorkers(workers)
+	p.lastUpdate = time.Now()
+	p.lastErr = nil
+	p.rebuildTable()
 }
 
 // kvEntryWithVignoble is a helper struct used only during parsing.

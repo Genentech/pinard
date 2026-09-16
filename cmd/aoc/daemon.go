@@ -12,6 +12,7 @@ import (
 
 	"github.com/Genentech/pinard/internal/config"
 	"github.com/Genentech/pinard/internal/pnats"
+	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/Genentech/pinard/internal/session"
 	"github.com/Genentech/pinard/internal/state"
 	"github.com/Genentech/pinard/internal/watcher"
@@ -26,6 +27,20 @@ var daemonCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		creds, vb, gl, nc := mustLoadAll()
 		defer nc.Close()
+
+		pCfg := vb.ResolvePressoirConfig("")
+		pr, err := pressoir.NewPressoir(pCfg, creds)
+		if err != nil {
+			log.Printf("[daemon] pressoir init failed: %v — falling back to GitLab adapter", err)
+			pr = pressoir.NewGitLabAdapter(creds.GitLab.Host, creds.Token())
+		}
+		// pressoirResolver selects the correct adapter per repo so that a vigne
+		// with pressoir: github is not polled via the vignoble-default GitLab adapter.
+		pressoirResolver := &watcher.PressoirResolver{
+			Vignoble: vb,
+			Creds:    creds,
+			Fallback: pr,
+		}
 
 		kv := pnats.NewKV(nc)
 
@@ -56,6 +71,8 @@ var daemonCmd = &cobra.Command{
 			IssueState:     issueState,
 			NATS:           nc,
 			KV:             kv,
+			Pressoir:       pr,
+			Resolver:       pressoirResolver,
 			GitLab:         gl,
 			Vignoble:       vb,
 			IgnoredAuthors: map[string]bool{creds.GitLab.User: true},
@@ -75,8 +92,11 @@ var daemonCmd = &cobra.Command{
 			State:         issueState,
 			NATS:          nc,
 			KV:            kv,
+			Pressoir:      pr,
+			Resolver:      pressoirResolver,
 			GitLab:        gl,
 			Vignoble:      vb,
+			Creds:         creds,
 			User:          creds.GitLab.User,
 			Owner:         creds.WebtermOwner(),
 			CapsulePoller: capsulePoller,
@@ -194,6 +214,8 @@ var daemonCmd = &cobra.Command{
 			NATS:         nc,
 			Session:      sm,
 			MRState:      mrState,
+			Pressoir:     pr,
+			Resolver:     pressoirResolver,
 			GitLab:       gl,
 			GitLabIssues: gl,
 		}

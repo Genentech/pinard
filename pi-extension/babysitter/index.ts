@@ -38,8 +38,7 @@ export default function babysitter(pi: ExtensionAPI) {
 
   const GITLAB_TOKEN = process.env.GITLAB_TOKEN || process.env.GLAB_TOKEN || "";
   if (!GITLAB_TOKEN) {
-    console.error(`[babysitter] CRITICAL: No GITLAB_TOKEN or GLAB_TOKEN — worker cannot interact with GitLab`);
-    return;
+    console.error(`[babysitter] WARNING: No GITLAB_TOKEN or GLAB_TOKEN set — git host operations via glab will fail (aoc pressoir commands use their own token resolution)`);
   }
 
   let runDir: string | null = null;
@@ -425,14 +424,13 @@ export default function babysitter(pi: ExtensionAPI) {
     }
   }
 
-  function registerWorkerOnGitLab(): void {
+  function registerWorkerOnPressoir(): void {
     if (!PROCESS_ARGS) return;
     try {
       const args = JSON.parse(PROCESS_ARGS);
-      const repo = args.repo || args.encodedRepo || "";
-      const encodedRepo = args.encodedRepo || encodeURIComponent(repo);
+      const repo = args.repo || "";
       const issueId = args.issueId || args.issue || "";
-      if (!encodedRepo) return;
+      if (!repo) return;
 
       let comment = `🧺 **Vendangeur attached**\n- Session: ${SESSION}\n- Process: ${PROCESS}\n- Parcelle: ${PARCELLE}\n- Run ID: ${RUN_ID}\n- Started: ${new Date().toISOString()}`;
       // Append a read-only web-terminal link so reviewers can watch this
@@ -446,15 +444,14 @@ export default function babysitter(pi: ExtensionAPI) {
       // Comment on issue
       if (issueId) {
         try {
-          const body = JSON.stringify({ body: comment });
-          execSync(`curl -s -X POST "https://${GITLAB_HOST}/api/v4/projects/${encodedRepo}/issues/${issueId}/notes" -H "PRIVATE-TOKEN: $GITLAB_TOKEN" -H "Content-Type: application/json" -d '${body.replace(/'/g, "'\\''")}'`, { encoding: "utf8", timeout: 10_000 });
+          execSync(`aoc pressoir comment-issue --repo ${JSON.stringify(repo)} --number ${issueId} --body ${JSON.stringify(comment)}`, { encoding: "utf8", timeout: 10_000 });
           console.error(`[babysitter] Registered on issue #${issueId}`);
         } catch (e: any) {
           console.error(`[babysitter] Failed to register on issue #${issueId}: ${e.message || e}`);
         }
       }
 
-      // Comment on MR (find from journal if exists)
+      // Comment on PR (find from journal if exists)
       const fs = require("node:fs");
       if (runDir) {
         const tasksDir = path.join(runDir, "tasks");
@@ -465,13 +462,12 @@ export default function babysitter(pi: ExtensionAPI) {
               try {
                 const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
                 if (result.taskId === "open-mr" && result.value?.mrIid) {
-                  const mrBody = JSON.stringify({ body: comment });
-                  execSync(`curl -s -X POST "https://${GITLAB_HOST}/api/v4/projects/${encodedRepo}/merge_requests/${result.value.mrIid}/notes" -H "PRIVATE-TOKEN: $GITLAB_TOKEN" -H "Content-Type: application/json" -d '${mrBody.replace(/'/g, "'\\''")}'`, { encoding: "utf8", timeout: 10_000 });
-                  console.error(`[babysitter] Registered on MR !${result.value.mrIid}`);
+                  execSync(`aoc pressoir comment-pr --repo ${JSON.stringify(repo)} --number ${result.value.mrIid} --body ${JSON.stringify(comment)}`, { encoding: "utf8", timeout: 10_000 });
+                  console.error(`[babysitter] Registered on PR #${result.value.mrIid}`);
                   break;
                 }
               } catch (e: any) {
-                console.error(`[babysitter] Failed to register on MR: ${e.message || e}`);
+                console.error(`[babysitter] Failed to register on PR: ${e.message || e}`);
               }
             }
           }
@@ -494,7 +490,7 @@ export default function babysitter(pi: ExtensionAPI) {
       console.error(`[babysitter] Run ready: ${runDir}`);
 
       // Register worker on issue/MR for traceability (runs on every spawn/resume)
-      registerWorkerOnGitLab();
+      registerWorkerOnPressoir();
 
       // Boot injection: seed agent with accumulated scope knowledge before the
       // first task. Best-effort — any failure is logged and silently skipped.

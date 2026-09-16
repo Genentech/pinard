@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
 	"github.com/Genentech/pinard/internal/config"
-	"github.com/Genentech/pinard/internal/gitlab"
+	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/Genentech/pinard/internal/pnats"
 	"github.com/spf13/cobra"
 )
@@ -38,7 +39,13 @@ var issueCmd = &cobra.Command{
 			return fmt.Errorf("project %q not found in vignes.yaml", project)
 		}
 
-		gl := gitlab.NewClient(creds.GitLab.Host, creds.Token())
+		pCfg := vb.ResolvePressoirConfig(vigne.Repo)
+		pr, err := pressoir.NewPressoir(pCfg, creds)
+		if err != nil {
+			return fmt.Errorf("pressoir: %w", err)
+		}
+		repoRef := pressoir.RepoRefFromPath(vigne.Repo)
+		ctx := context.Background()
 
 		params := map[string]string{
 			"title": title,
@@ -50,25 +57,20 @@ var issueCmd = &cobra.Command{
 			params["labels"] = labels
 		}
 
-		body, err := gl.CreateIssue(vigne.Repo, params)
+		issue, err := pr.CreateIssue(ctx, repoRef, params)
 		if err != nil {
 			return fmt.Errorf("create issue failed: %w", err)
 		}
-
-		var result map[string]any
-		json.Unmarshal(body, &result)
-		iid := result["iid"]
-		url := result["web_url"]
 
 		// Assign to pinard user if requested
 		if assign && creds.GitLab.User != "" {
 			assignParams := map[string]string{
 				"assignee_username": creds.GitLab.User,
 			}
-			gl.UpdateIssue(vigne.Repo, int(iid.(float64)), assignParams)
+			pr.UpdateIssue(ctx, repoRef, issue.Number, assignParams)
 		}
 
-		fmt.Printf("Created issue #%v on %s: %v\n", iid, project, url)
+		fmt.Printf("Created issue #%d on %s: %s\n", issue.Number, project, issue.WebURL)
 		return nil
 	},
 }

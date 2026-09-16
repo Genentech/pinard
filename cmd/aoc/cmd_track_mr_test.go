@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/Genentech/pinard/internal/config"
-	"github.com/Genentech/pinard/internal/gitlab"
+	"github.com/Genentech/pinard/internal/pressoir"
 )
 
 // mockKV is a simple in-memory KVReader used for testing resolveAgentRecord.
@@ -243,7 +243,7 @@ func TestResolveAgentRecord(t *testing.T) {
 func TestWebtermLinkAlreadyPosted(t *testing.T) {
 	cases := []struct {
 		name  string
-		notes []gitlab.Note
+		notes []pressoir.Comment
 		want  bool
 	}{
 		{
@@ -253,12 +253,12 @@ func TestWebtermLinkAlreadyPosted(t *testing.T) {
 		},
 		{
 			name:  "notes without marker → not posted",
-			notes: []gitlab.Note{{ID: 1, Body: "LGTM"}, {ID: 2, Body: "CI passed"}},
+			notes: []pressoir.Comment{{ID: 1, Body: "LGTM"}, {ID: 2, Body: "CI passed"}},
 			want:  false,
 		},
 		{
 			name: "one note contains marker → already posted",
-			notes: []gitlab.Note{
+			notes: []pressoir.Comment{
 				{ID: 1, Body: "LGTM"},
 				{ID: 2, Body: webtermNoteMarker + "\n🖥️ **Live terminal** (vendangeur `session`, read-only):\n\nhttps://example.com"},
 			},
@@ -266,7 +266,7 @@ func TestWebtermLinkAlreadyPosted(t *testing.T) {
 		},
 		{
 			name: "second call with duplicate notes → already posted",
-			notes: []gitlab.Note{
+			notes: []pressoir.Comment{
 				{ID: 10, Body: webtermNoteMarker + "\n🖥️ **Live terminal** (vendangeur `a`, read-only):\n\nhttps://a"},
 				{ID: 11, Body: webtermNoteMarker + "\n🖥️ **Live terminal** (vendangeur `b`, read-only):\n\nhttps://b"},
 			},

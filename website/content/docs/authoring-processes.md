@@ -5,7 +5,7 @@ group: Building on Pinard
 ---
 
 A **babysitter process** is the definition of a
-[semi-deterministic loop](docs/semi-deterministic-loop/). Writing one is how you
+[semi-deterministic loop](/docs/semi-deterministic-loop/). Writing one is how you
 teach Pinard to do something new — it is the point at which Pinard becomes *an
 engine you build on* rather than a fixed tool.
 
@@ -28,7 +28,7 @@ sequences them.
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/authoring-process-anatomy.jpg" alt="An open sketched process ledger with bounded task cards and structured output on the left, deterministic branching and a breakpoint gate on the right, and a resumable journal ribbon below.">
+    <img src="/images/docs/authoring-process-anatomy.jpg" alt="An open sketched process ledger with bounded task cards and structured output on the left, deterministic branching and a breakpoint gate on the right, and a resumable journal ribbon below.">
     <span class="doc-figure-label charcoal" style="--x: 27%; --y: 5%;">Task definitions</span>
     <span class="doc-figure-label mustard" style="--x: 72%; --y: 5%;">Deterministic process function</span>
     <span class="doc-figure-label doc-figure-label--desktop terracotta" style="--x: 17%; --y: 69%;">Typed task output</span>
@@ -143,11 +143,11 @@ repeat side effects (e.g. check "does the MR already exist?" before opening one)
 - **Gate the risky transitions.** Use `ctx.breakpoint` where a wrong step is
   expensive or irreversible.
 - **Make steps idempotent.** Assume any step may run twice after a resume.
-- **Emit knowledge.** Save decisions and discoveries to [memory](docs/memory/) so
+- **Emit knowledge.** Save decisions and discoveries to [memory](/docs/memory/) so
   the next run of this process starts smarter.
 
 ## Reference process
 
-The built-in [SWE process](docs/swe-process/) (`processes/swe.js`) is a complete,
+The built-in [SWE process](/docs/swe-process/) (`processes/swe.js`) is a complete,
 production example: fetch → analyze → implement → test → open MR → tend pipelines.
 Read it alongside this page as a template.

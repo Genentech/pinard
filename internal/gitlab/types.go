@@ -1,5 +1,13 @@
 package gitlab
 
+// DiffRefs holds the diff SHAs GitLab returns on a merge request.
+// Required for posting position-based (inline) discussions.
+type DiffRefs struct {
+	BaseSHA  string `json:"base_sha"`
+	StartSHA string `json:"start_sha"`
+	HeadSHA  string `json:"head_sha"`
+}
+
 type MergeRequest struct {
 	IID            int      `json:"iid"`
 	State          string   `json:"state"`
@@ -13,6 +21,7 @@ type MergeRequest struct {
 	Draft          bool     `json:"draft"`
 	WorkInProgress bool     `json:"work_in_progress"`
 	SourceBranch   string   `json:"source_branch"`
+	DiffRefs       DiffRefs `json:"diff_refs"`
 }
 
 type Issue struct {

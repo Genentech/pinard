@@ -10,7 +10,7 @@ recurring task. The scheduler runs inside the daemon (every 60s) and reads
 
 <figure class="doc-figure">
   <div class="doc-figure-visual">
-    <img src="images/docs/scheduling-dispatch-v3.jpg" style="aspect-ratio: 32 / 15;" alt="A single sketched scheduling sequence: a clock dispatches through the daemon to a vendangeur and vigne task, then outcomes notify the conductor.">
+    <img src="/images/docs/scheduling-dispatch-v3.jpg" style="aspect-ratio: 32 / 15;" alt="A single sketched scheduling sequence: a clock dispatches through the daemon to a vendangeur and vigne task, then outcomes notify the conductor.">
     <span class="doc-figure-label doc-figure-label--desktop charcoal" style="--x: 11%; --y: 83%;">Schedule</span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 34%; --y: 83%;">Daemon</span>
     <span class="doc-figure-label doc-figure-label--desktop mustard" style="--x: 50%; --y: 83%;">Vendangeur</span>
