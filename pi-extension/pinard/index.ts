@@ -1076,7 +1076,17 @@ interface WorkerInfo {
   status: "working" | "idle" | "completed" | "stopped";
   process?: string;
   parcelle?: string;
+  remote?: boolean;
 }
+
+// Remote/standalone workers (HPC/SIF, PINARD_STANDALONE=1) run on another host,
+// so their tmux session is NEVER in this conductor's local tmux. Their liveness
+// MUST be judged by KV lastSeen freshness, not local-tmux presence — otherwise
+// the conductor deletes the KV record the webterm gateway reads, and the remote
+// worker flaps invisible. Threshold mirrors the gateway's agentLivenessThreshold
+// (internal/webterm/gateway.go = 5m) so both sides agree on when a remote agent
+// is stale.
+const REMOTE_AGENT_TTL_MS = 5 * 60 * 1000;
 
 let cachedWorkers: WorkerInfo[] = [];
 let workersCacheTime = 0;
@@ -1114,6 +1124,33 @@ async function refreshWorkersFromKV(): Promise<void> {
         if (!state.vignoble) continue;
 
         const sessionName = state.name || key;
+
+        // Standalone/remote workers: never reap by local tmux (their session is
+        // on another host). Judge liveness by lastSeen freshness, matching the
+        // webterm gateway. Only reap when the heartbeat has genuinely stopped.
+        if (state.standalone === true) {
+          const lastSeenMs = Date.parse(state.lastSeen || "");
+          const fresh =
+            Number.isFinite(lastSeenMs) &&
+            Date.now() - lastSeenMs <= REMOTE_AGENT_TTL_MS;
+          if (!fresh) {
+            staleKeys.push(key);
+            continue;
+          }
+          workers.push({
+            name: sessionName,
+            sessionId: state.session_id || key,
+            project: state.project || "unknown",
+            mr: state.mr || null,
+            pressoir: resolveVigneProvider(state.project || ""),
+            status: getWorkerStatus(state),
+            process: state.process || undefined,
+            parcelle: state.parcelle || undefined,
+            remote: true,
+          });
+          continue;
+        }
+
         const isAlive = liveSessions.has(sessionName);
 
         if (!isAlive) {
