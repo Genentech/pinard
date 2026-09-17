@@ -1,7 +1,14 @@
 name: Publish container images
 
 # Builds and pushes public container images to GitHub Container Registry (GHCR)
-# on every tagged release. Uses the built-in GITHUB_TOKEN — no extra secrets required.
+# on every v* tag. Uses the built-in GITHUB_TOKEN — no extra secrets required.
+#
+# Triggered directly by the v* tag (in parallel with release.yml), NOT by the
+# `release: published` event: a release created by release.yml uses GITHUB_TOKEN,
+# and GITHUB_TOKEN-authored events do not trigger other workflows (GitHub loop-
+# prevention) — so a release-event trigger would silently never fire. Keying on
+# the tag makes this robust whether the tag is pushed by a human or by auto-tag
+# (with RELEASE_TOKEN). workflow_dispatch allows manual (re)builds for a tag.
 #
 # Images published:
 #   ghcr.io/genentech/pinard:<version>           — k8s services image (webterm-gateway +
@@ -22,8 +29,14 @@ name: Publish container images
 # and mount/inject it at runtime if needed. See README for details.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v<semver> tag to build images for"
+        required: true
 
 permissions:
   contents: read
@@ -39,6 +52,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Build from the tag (workflow_dispatch passes it explicitly; a tag
+          # push resolves via github.ref).
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Set up QEMU (for multi-arch)
         uses: docker/setup-qemu-action@v3
@@ -53,11 +70,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from release tag
+      - name: Extract version from tag
         id: version
         run: |
-          # Release tags are "v<semver>" (e.g. v0.61.0); strip the leading "v".
-          VERSION="${GITHUB_REF_NAME#v}"
+          # Tags are "v<semver>" (e.g. v0.61.0); strip the leading "v".
+          # workflow_dispatch supplies the tag via input; a tag push via ref_name.
+          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${REF#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       # ── k8s services image (root Dockerfile) ─────────────────────────────
