@@ -1,0 +1,76 @@
+name: Auto-tag version
+
+# Keeps public release versions in lockstep with the canonical chart version in
+# pyproject.toml (the `v*` lineage). On a push to main — e.g. an OSS sync snapshot
+# that carries a bumped version — if pyproject's version has no matching
+# `v<version>` tag yet, create and push it. That tag then drives:
+#   - release.yml       → GitHub Release for v<version>
+#   - docker-publish.yml → GHCR images tagged <version>
+# so every synced version is released with a matching number, WITHOUT ever pushing
+# a commit to main (tag creation is not blocked by the branch-protection rule).
+#
+# Why not mirror the internal GitLab tags directly: the public repo is a curated,
+# scrubbed snapshot with its own history, so an internal v<version> commit SHA does
+# not exist here. We re-tag the public snapshot with the same version number.
+#
+# IMPORTANT — downstream triggering:
+#   A tag pushed with the default GITHUB_TOKEN does NOT trigger other workflows
+#   (GitHub loop-prevention). To make the new tag fire release.yml +
+#   docker-publish.yml, set a repo secret RELEASE_TOKEN (a PAT or GitHub App token
+#   with `contents: write`). Without it the tag is still created, but the release/
+#   image workflows won't auto-run — trigger release.yml via workflow_dispatch for
+#   that tag if needed.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: write # create + push tags
+
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+
+jobs:
+  auto-tag:
+    name: Tag pyproject version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Prefer a PAT so the pushed tag triggers release.yml + docker-publish.yml
+          # (GITHUB_TOKEN-pushed tags are excluded from workflow triggers).
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Read version from pyproject.toml
+        id: v
+        run: |
+          # PEP 621 [project].version is canonical; fall back to a line grep.
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])' 2>/dev/null \
+            || grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::could not read version from pyproject.toml"; exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version ${VERSION} (tag v${VERSION})"
+
+      - name: Create tag if missing
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          git fetch --tags --quiet
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists — nothing to do."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+          echo "Created and pushed ${TAG}."
