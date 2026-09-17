@@ -1,148 +1,99 @@
 name: Release
 
-# GitHub Actions release workflow — collapses the two GitLab release lineages.
+# Tag-driven GitHub release. Nothing is ever pushed to `main` from CI — the branch
+# stays protected (changes land only via pull request). To cut a release, create and
+# push a `v<semver>` tag (e.g. after merging a `chore(release)` version-bump PR, or
+# locally: `git tag v0.62.0 && git push origin v0.62.0`). This workflow then creates
+# a GitHub Release from that tag; docker-publish.yml builds and pushes the GHCR
+# images from the same tag.
 #
-# The GitLab pipeline has two distinct version lineages:
-#   - Image lineage (.image-version/.cz.toml, `image-$version` tags): bumped by
-#     `.bump-image` on code/infra paths (`*local-trigger-image-files`).
-#   - Chart lineage (root pyproject.toml, `v$version` tags): bumped by `.bump-chart`
-#     on changes to charts/**; drives Flux CD / olympus GitOps.
-#
-# A standalone GitHub repo ships neither Helm charts nor Flux, so there is no
-# meaningful chart/image split. This workflow collapses both lineages into a
-# single `v*` release: it runs `cz bump --yes` on the root pyproject.toml
-# (chart lineage config) and cuts a `v<version>` tag whenever code/infra paths
-# change — the same paths that trigger `.bump-image` on GitLab.
-#
-# What this does:
-#   1. `cz bump --yes` — commitizen reads conventional commits since the last tag,
-#      increments the semver in pyproject.toml, updates CHANGELOG.md, commits, and
-#      creates a `v<version>` tag.
-#   2. Push the bump commit + tag back to main.
-#   3. Create a GitHub Release from the new tag with the CHANGELOG entry as notes.
+# Why tag-driven (not auto-bump-on-push): pushing a `cz bump` commit + tag directly
+# to `main` violates branch-protection ("changes must go through a PR"). Rather than
+# grant a CI actor a bypass on `main`, the version bump is a normal PR and the tag is
+# the release trigger — consistent with the project's no-direct-push-to-main rule.
 #
 # Gaps vs the GitLab flow (documented, not faked):
-#   - `olympus-cd`: triggers Flux CD reconciliation on an internal Kubernetes cluster.
-#     This step depends on infrastructure (olympus, Flux) that is not reachable from
-#     GitHub Actions. See "Releasing on GitHub" in docs/github-setup.md for details.
-#   - `bump-chart` (chart-only changes): the GitLab flow has a separate job that bumps
-#     the Helm chart version on changes to charts/**. That path is not mirrored here
-#     because the public GitHub mirror does not ship internal Helm charts.
+#   - olympus-cd: triggers Flux CD reconciliation on an internal cluster — not
+#     reachable from GitHub Actions. See "Releasing on GitHub" in docs/github-setup.md.
+#   - bump-chart: internal Helm chart lineage; not shipped in the public mirror.
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "cmd/**"
-      - "internal/**"
-      - "pi-extension/**"
-      - "bin/**"
-      - "processes/**"
-      - "website/**"
-      - "Makefile"
-      - "install"
-      - "go.mod"
-      - "go.sum"
-      - "Dockerfile"
-      - ".github/workflows/release.yml"
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v<semver> tag to (re)create a release for"
+        required: true
 
 permissions:
-  contents: write   # push bump commit + tag; create GitHub Release
+  contents: write # create GitHub Release (no push to main)
 
-# One release at a time. Do NOT cancel-in-progress — a partial cz bump that was
-# interrupted would leave pyproject.toml and CHANGELOG.md in an inconsistent state.
+# One release at a time.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
   release:
-    name: Version bump & release
+    name: Create GitHub Release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history required: commitizen walks the log back to the last tag to
-          # determine the version increment (major/minor/patch).
           fetch-depth: 0
-          # Use a PAT when available so the push can trigger downstream CI
-          # (GITHUB_TOKEN pushes are intentionally excluded from workflow triggers).
-          # Fall back to GITHUB_TOKEN for repositories where no PAT is configured.
-          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Configure git identity
+      - name: Resolve version from tag
+        id: version
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install commitizen
-        run: pip install commitizen
-
-      - name: Bump version (cz bump)
-        id: cz
-        run: |
-          # --yes: non-interactive; auto-detects increment from conventional commits.
-          # Writes pyproject.toml (version_provider = pep621), CHANGELOG.md, and
-          # creates a `v<version>` annotated tag.
-          cz bump --yes
-          echo "version=$(cz version --project)" >> "$GITHUB_OUTPUT"
-
-      - name: Push bump commit and tag
-        run: |
-          git push origin main
-          git push origin "v${{ steps.cz.outputs.version }}"
+          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          # Release tags are "v<semver>" (e.g. v0.62.0); strip the leading "v".
+          VERSION="${REF#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Extract changelog entry
         id: changelog
         run: |
-          VERSION="${{ steps.cz.outputs.version }}"
-          # Pull out the section for the new version from CHANGELOG.md.
+          # Pull the section for this version from CHANGELOG.md if present.
           # cz writes headings like "## v0.60.0 (2026-09-15)".
           python3 - <<'EOF'
-          import re, sys
-          version = "${{ steps.cz.outputs.version }}"
-          with open("CHANGELOG.md") as f:
-              text = f.read()
-          # Match the section for this version up to the next "## " heading.
+          import re
+          version = "${{ steps.version.outputs.version }}"
+          try:
+              with open("CHANGELOG.md") as f:
+                  text = f.read()
+          except FileNotFoundError:
+              raise SystemExit(0)  # no changelog — release with auto-generated notes
           pattern = rf"(## v{re.escape(version)}.*?)(?=\n## |\Z)"
           m = re.search(pattern, text, re.DOTALL)
           if not m:
-              sys.exit(0)  # No entry found — release without body
-          entry = m.group(1).strip()
+              raise SystemExit(0)  # no entry — release with auto-generated notes
           with open("/tmp/release-notes.md", "w") as f:
-              f.write(entry)
+              f.write(m.group(1).strip())
           EOF
 
       - name: Create GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${{ steps.cz.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
           NOTES_FILE="/tmp/release-notes.md"
           if [[ -s "$NOTES_FILE" ]]; then
-            gh release create "v${VERSION}" \
-              --title "v${VERSION}" \
+            gh release create "$TAG" \
+              --title "$TAG" \
               --notes-file "$NOTES_FILE"
           else
-            gh release create "v${VERSION}" \
-              --title "v${VERSION}" \
+            gh release create "$TAG" \
+              --title "$TAG" \
               --generate-notes
           fi
 
       # ── olympus-cd (GitOps trigger) ──────────────────────────────────────────
-      # TODO: The GitLab flow runs an `olympus-cd` job after release that amends
-      # the app GitRepository watched by Flux CD, triggering a Kubernetes rollout.
-      # This step depends on internal infrastructure (olympus, Flux, cluster
-      # credentials) that is not reachable from GitHub Actions.
-      #
-      # To wire this up for a self-hosted deployment:
-      #   1. Expose a webhook or API endpoint that the Actions runner can reach.
-      #   2. Store the endpoint URL + auth token as repository secrets.
-      #   3. Replace this comment with a `curl` or `gh` call to that endpoint.
-      #
-      # See "Releasing on GitHub — olympus-cd gap" in docs/github-setup.md.
+      # The GitLab flow runs an `olympus-cd` job after release that amends the app
+      # GitRepository watched by Flux CD, triggering a Kubernetes rollout. That
+      # depends on internal infrastructure (olympus, Flux, cluster credentials)
+      # not reachable from GitHub Actions. See "Releasing on GitHub — olympus-cd
+      # gap" in docs/github-setup.md to wire it up for a self-hosted deployment.
