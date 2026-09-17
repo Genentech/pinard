@@ -87,7 +87,11 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # amd64-only: the Dockerfile's site/build stages hardcode the amd64
+          # Hugo/Go toolchain, so an arm64 variant fails (hugo: exec/ not found).
+          # Adding arm64 needs a BUILDPLATFORM/TARGETARCH cross-compile refactor
+          # of the Dockerfile — deferred.
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.IMAGE_BASE }}:${{ steps.version.outputs.version }}
@@ -101,7 +105,8 @@ jobs:
         with:
           context: .
           file: cmd/webterm-gateway/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # amd64-only (see note on the k8s services image above).
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.IMAGE_BASE }}-webterm-gateway:${{ steps.version.outputs.version }}
