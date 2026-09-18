@@ -14,12 +14,13 @@ ARG GOLANG=golang:1.24-bookworm
 ARG DEBIAN=debian:bookworm-slim
 
 # ── Stage 1: build ────────────────────────────────
-FROM ${GOLANG} AS build
+FROM --platform=$BUILDPLATFORM ${GOLANG} AS build
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/webterm-gateway ./cmd/webterm-gateway
 
 # ── Stage 2: minimal runtime ──────────────────────

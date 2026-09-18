@@ -1,6 +1,6 @@
 ---
 title: Capsule Protocol
-weight: 41
+weight: 42
 group: Applications
 ---
 

@@ -1,6 +1,7 @@
 ---
 title: "MR Workflow"
-weight: 35
+weight: 41
+group: Applications
 ---
 
 # MR Workflow

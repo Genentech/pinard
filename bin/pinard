@@ -72,6 +72,12 @@ _pinard_sessions() {
 VIGNOBLE=""
 STANDALONE=""        # set when --vignoble-name is used (remote worker, no vignoble dir)
 VIGNOBLE_NAME=""
+# pinard init → forward to `aoc init` (discoverability alias)
+if [[ "${1:-}" == "init" ]]; then
+  shift
+  exec aoc init "$@"
+fi
+
 MAITRE_PARCELLE="" # set when running as a per-parcelle maître (scoped conductor)
 _ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -107,22 +113,34 @@ if [[ -z "$STANDALONE" ]]; then
     VIGNOBLE="$(pwd)"
   fi
 
-  # If no vignoble specified and not inside one, offer a picker
+  # If no vignoble specified and not inside one, offer a picker or creation
   if [[ -z "$VIGNOBLE" || ! -f "$VIGNOBLE/vignes.yaml" ]]; then
     if command -v fzf &>/dev/null; then
-      # Pick a vignoble to launch/attach
-      selected="$(for vb_dir in "$VIGNOBLE_ROOT"/vignoble-*; do
+      # Build list: prepend "+ create new vignoble" so it is always available
+      _CREATE_ENTRY="+ create new vignoble"
+      selected="$( { echo "$_CREATE_ENTRY"; for vb_dir in "$VIGNOBLE_ROOT"/vignoble-*; do
         [[ -f "$vb_dir/vignes.yaml" ]] || continue
         basename "$vb_dir" | sed 's/^vignoble-//'
-      done | fzf --prompt="vignoble> " --header="Select a vignoble to start")"
-      if [[ -n "$selected" ]]; then
+      done; } | fzf --prompt="vignoble> " --header="Select a vignoble or create a new one")"
+      if [[ "$selected" == "$_CREATE_ENTRY" ]]; then
+        # User chose to create a new vignoble
+        exec aoc init
+      elif [[ -n "$selected" ]]; then
         VIGNOBLE="$VIGNOBLE_ROOT/vignoble-$selected"
       else
         exit 0
       fi
     else
-      echo "Error: no vignoble found. Run from a vignoble directory or use: pinard --vignoble <path> (or --vignoble-name <name> for a standalone worker)" >&2
-      exit 1
+      # No fzf: prompt to create
+      printf 'No vignoble found here. Create a new one? [Y/n] ' >&2
+      read -r _ans </dev/tty
+      case "${_ans:-y}" in
+        [yY]*) exec aoc init ;;
+        *)
+          echo "No vignoble found. Run 'pinard init' to create one, or cd into a vignoble directory." >&2
+          exit 1
+          ;;
+      esac
     fi
   fi
 

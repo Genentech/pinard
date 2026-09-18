@@ -187,10 +187,20 @@ aoc pressoir resolve-user --username <u> [--repo <owner/repo>]
 aoc pressoir track-pr --repo <owner/repo> --number <n> --session <s>
 aoc pressoir get-repo --repo <owner/repo>
 aoc pressoir link-issues --repo <owner/repo> --number <n> --target-repo <r2> --target-number <n2> [--link-type blocks]
+aoc pressoir approve-pr --repo <owner/repo> --number <n>             # approve using PINARD_OWNER_GITLAB_TOKEN (manual use only)
+aoc pressoir get-pr-changes --repo <owner/repo> --number <n>          # list changed files as a newline-separated list
 ```
 
 All subcommands output JSON on stdout. The provider (`gitlab` or `github`) is resolved
 from `vignes.yaml` for the given `--repo`; no flags needed when the repo is registered.
+
+`approve-pr` uses `PINARD_OWNER_GITLAB_TOKEN` (the operator’s own PAT, not the bot
+token) so GitLab’s self-approval restriction does not apply. It is a **manual operator
+tool** — Pinard’s automated review path (see [MR Workflow](/docs/mr-workflow/#automated-review-auto_review))
+never calls it automatically.
+
+`get-pr-changes` outputs one file path per line; useful for scripts and for the
+automated review prompt.
 
 ### `aoc epic` {#aoc-epic}
 
