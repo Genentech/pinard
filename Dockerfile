@@ -13,9 +13,10 @@
 
 ARG DEBIAN=debian:bookworm-slim
 ARG GOLANG=golang:1.24-bookworm
+ARG TARGETARCH
 
 # ── Stage 1: render the Hugo site ────────────────
-FROM ${DEBIAN} AS site
+FROM --platform=$BUILDPLATFORM ${DEBIAN} AS site
 ARG HUGO_VERSION=0.148.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates wget git gcc g++ libc-dev && \
@@ -31,19 +32,21 @@ COPY website/ ./website/
 RUN cd website && hugo --minify --destination /out/site
 
 # ── Stage 2: build all Go binaries ───────────────
-FROM ${GOLANG} AS build
+FROM --platform=$BUILDPLATFORM ${GOLANG} AS build
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
         go build -trimpath -ldflags="-s -w" -o /out/webterm-gateway ./cmd/webterm-gateway && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
         go build -trimpath -ldflags="-s -w" -o /out/memory-ingester ./cmd/memory-ingester && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
         go build -trimpath -ldflags="-s -w" -o /out/memory-recall    ./cmd/memory-recall && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
         go build -trimpath -ldflags="-s -w" -o /out/memory-rollup    ./cmd/memory-rollup && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
         go build -trimpath -ldflags="-s -w" -o /out/memory-curator   ./cmd/memory-curator
 
 # ── Stage 3: minimal runtime ──────────────────────

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,7 +9,9 @@ import (
 	"strings"
 
 	"github.com/Genentech/pinard/internal/config"
+	term "github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var initCmd = &cobra.Command{
@@ -19,6 +22,10 @@ var initCmd = &cobra.Command{
 		gitlabGroup, _ := cmd.Flags().GetString("gitlab-group")
 		targetPath, _ := cmd.Flags().GetString("path")
 		local, _ := cmd.Flags().GetBool("local")
+
+		// provider / wizardRepo are set by the interactive wizard; ignored in flag mode.
+		provider := "" // "github" | "gitlab"
+		var wizardRepo *wizardVigne
 
 		name := ""
 		if len(args) > 0 {
@@ -34,12 +41,30 @@ var initCmd = &cobra.Command{
 			}
 		}
 
+		// Interactive wizard: enter when stdin+stdout are a TTY and required
+		// values are still missing. Flags always win — CI/scripts are unaffected.
+		needWizard := term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stdout.Fd()) &&
+			name == "" && !local && gitlabHost == "" && targetPath == ""
+		if needWizard {
+			w, err := runInitWizard()
+			if err != nil {
+				return err
+			}
+			name = w.name
+			targetPath = w.targetPath
+			local = w.local
+			gitlabHost = w.gitHost
+			gitlabGroup = w.group
+			provider = w.provider
+			wizardRepo = w.firstRepo
+		}
+
 		if name == "" {
 			return fmt.Errorf("name is required (or run from an existing vignoble directory)")
 		}
 		// --local mode: no GitLab host required (services are local, no cluster)
-		if !local && gitlabHost == "" && targetPath == "" {
-			return fmt.Errorf("--gitlab-host is required for new vignobles")
+		if !local && gitlabHost == "" && targetPath == "" && provider == "" {
+			return fmt.Errorf("--gitlab-host is required for new vignobles (or run interactively: aoc init)")
 		}
 
 		home, _ := os.UserHomeDir()
@@ -69,6 +94,8 @@ var initCmd = &cobra.Command{
 			var content string
 			if local {
 				content = soloVignesYAML(gitlabHost, gitlabGroup)
+			} else if provider == "github" {
+				content = githubVignesYAML(gitlabHost, gitlabGroup)
 			} else {
 				content = fmt.Sprintf("gitlab_host: %s\n", gitlabHost)
 				if gitlabGroup != "" {
@@ -82,6 +109,11 @@ var initCmd = &cobra.Command{
 			fmt.Println("  vignes.yaml exists")
 		}
 
+		// Append wizard first-repo to vignes.yaml when provided.
+		if wizardRepo != nil {
+			appendVigneToYAML(vignesPath, wizardRepo)
+		}
+
 		// Solo mode: write ~/.config/pinard/credentials.yaml with localhost endpoints.
 		// Done early (before daemon start) so the daemon can pick up the config.
 		if local {
@@ -89,6 +121,13 @@ var initCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "  warning: could not write solo credentials.yaml: %v\n", err)
 			} else {
 				fmt.Println("  ~/.config/pinard/credentials.yaml (solo profile)")
+			}
+		} else if needWizard {
+			// Interactive wizard: scaffold a credentials template when missing.
+			// Flag-based / CI invocations (aoc init --gitlab-host ...) do not
+			// write credentials.yaml — that would change the existing contract.
+			if err := writeServerCredentialsTemplate(provider, gitlabHost, gitlabGroup); err != nil {
+				fmt.Fprintf(os.Stderr, "  warning: could not write credentials.yaml template: %v\n", err)
 			}
 		}
 
@@ -364,6 +403,284 @@ func ensureGitignoreEntries(path string, entries []string) {
 			f.WriteString(entry + "\n")
 		}
 	}
+}
+
+// wizardVigne holds the first-repo details collected during the interactive wizard.
+type wizardVigne struct {
+	name      string
+	repo      string
+	autoMerge bool
+}
+
+// wizardResult holds values collected during the interactive wizard.
+type wizardResult struct {
+	name       string
+	targetPath string
+	local      bool
+	provider   string // "github" | "gitlab" | "" (local)
+	gitHost    string
+	group      string
+	firstRepo  *wizardVigne
+}
+
+// promptTTY prints a prompt with an optional default value and reads a line
+// from stdin. Returns the default when the user enters nothing.
+func promptTTY(prompt, defaultVal string) string {
+	if defaultVal != "" {
+		fmt.Printf("%s [%s]: ", prompt, defaultVal)
+	} else {
+		fmt.Printf("%s: ", prompt)
+	}
+	r := bufio.NewReader(os.Stdin)
+	line, _ := r.ReadString('\n')
+	line = strings.TrimRight(line, "\r\n")
+	if line == "" {
+		return defaultVal
+	}
+	return line
+}
+
+// promptChoice displays numbered options and returns the selected index (0-based).
+// Returns defaultIdx when the user enters nothing or an out-of-range number.
+func promptChoice(prompt string, options []string, defaultIdx int) int {
+	fmt.Println(prompt)
+	for i, o := range options {
+		marker := " "
+		if i == defaultIdx {
+			marker = "*"
+		}
+		fmt.Printf("  %s %d) %s\n", marker, i+1, o)
+	}
+	raw := promptTTY("Choice", fmt.Sprintf("%d", defaultIdx+1))
+	var idx int
+	fmt.Sscanf(raw, "%d", &idx)
+	idx-- // 1-based → 0-based
+	if idx < 0 || idx >= len(options) {
+		return defaultIdx
+	}
+	return idx
+}
+
+// runInitWizard collects vignoble configuration interactively.
+func runInitWizard() (*wizardResult, error) {
+	fmt.Println()
+	fmt.Println("Welcome to Pinard! Let's create your first vignoble.")
+	fmt.Println()
+
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+
+	// 1. Name
+	defaultName := strings.TrimPrefix(filepath.Base(cwd), "vignoble-")
+	name := promptTTY("Vignoble name", defaultName)
+	if name == "" {
+		return nil, fmt.Errorf("vignoble name is required")
+	}
+
+	// 2. Location
+	defaultLoc := filepath.Join(home, "vignoble-"+name)
+	locChoice := promptChoice("Location", []string{
+		defaultLoc,
+		"Use the current directory (" + cwd + ")",
+	}, 0)
+	targetPath := defaultLoc
+	if locChoice == 1 {
+		targetPath = cwd
+	}
+
+	// 3. Backend
+	backendChoice := promptChoice("Backend", []string{
+		"Connect to a Git host (GitHub / GitLab)",
+		"Solo / local (no Git host — laptop-only)",
+	}, 0)
+
+	if backendChoice == 1 {
+		// Solo mode — no further questions needed.
+		return &wizardResult{
+			name:       name,
+			targetPath: targetPath,
+			local:      true,
+		}, nil
+	}
+
+	// 4. Provider
+	providerChoice := promptChoice("Git provider", []string{
+		"GitHub (github.com or GHES)",
+		"GitLab (self-hosted or gitlab.com)",
+	}, 0)
+	provider := "github"
+	if providerChoice == 1 {
+		provider = "gitlab"
+	}
+
+	// 5. Host
+	defaultHost := "github.com"
+	if provider == "gitlab" {
+		defaultHost = ""
+	}
+	gitHost := promptTTY("Git host", defaultHost)
+	if gitHost == "" && provider == "gitlab" {
+		return nil, fmt.Errorf("git host is required for GitLab")
+	}
+
+	// 6. Group / org (optional)
+	groupLabel := "GitHub org (optional)"
+	if provider == "gitlab" {
+		groupLabel = "GitLab group (optional)"
+	}
+	group := promptTTY(groupLabel, "")
+
+	// 7. First repo (optional)
+	var firstRepo *wizardVigne
+	addRepo := promptTTY("Add a first repository now? [y/N]", "n")
+	if strings.ToLower(strings.TrimSpace(addRepo)) == "y" {
+		repoName := promptTTY("  Repository short name (e.g. my-app)", "")
+		repoPath := promptTTY("  Repository path (e.g. owner/my-app)", "")
+		if repoName != "" && repoPath != "" {
+			amRaw := promptTTY("  Enable auto-merge? [y/N]", "n")
+			firstRepo = &wizardVigne{
+				name:      repoName,
+				repo:      repoPath,
+				autoMerge: strings.ToLower(strings.TrimSpace(amRaw)) == "y",
+			}
+		}
+	}
+
+	return &wizardResult{
+		name:       name,
+		targetPath: targetPath,
+		provider:   provider,
+		gitHost:    gitHost,
+		group:      group,
+		firstRepo:  firstRepo,
+	}, nil
+}
+
+// githubVignesYAML returns vignes.yaml content for a GitHub-backed vignoble.
+func githubVignesYAML(host, group string) string {
+	var b strings.Builder
+	b.WriteString("pressoir:\n")
+	b.WriteString("  provider: github\n")
+	if host != "" && host != "github.com" {
+		fmt.Fprintf(&b, "  host: %s\n", host)
+	}
+	if group != "" {
+		fmt.Fprintf(&b, "  org: %s\n", group)
+	}
+	b.WriteString("\nvignes: {}\n")
+	return b.String()
+}
+
+// appendVigneToYAML appends a vigne entry to an existing vignes.yaml.
+func appendVigneToYAML(vignesPath string, v *wizardVigne) {
+	data, err := os.ReadFile(vignesPath)
+	if err != nil {
+		return
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return
+	}
+	if raw == nil {
+		raw = make(map[string]any)
+	}
+	vignes, _ := raw["vignes"].(map[string]any)
+	if vignes == nil {
+		vignes = make(map[string]any)
+	}
+	entry := map[string]any{"repo": v.repo}
+	if v.autoMerge {
+		entry["auto_merge"] = true
+	}
+	vignes[v.name] = entry
+	raw["vignes"] = vignes
+	out, err := yaml.Marshal(raw)
+	if err != nil {
+		return
+	}
+	os.WriteFile(vignesPath, out, 0644)
+	fmt.Printf("  added vigne '%s' (repo: %s)\n", v.name, v.repo)
+}
+
+// writeServerCredentialsTemplate scaffolds ~/.config/pinard/credentials.yaml
+// with provider-specific placeholders. Never overwrites an existing file.
+func writeServerCredentialsTemplate(provider, host, group string) error {
+	home, _ := os.UserHomeDir()
+	credsPath := filepath.Join(home, ".config", "pinard", "credentials.yaml")
+
+	if _, err := os.Stat(credsPath); err == nil {
+		// Already exists — preserve user customisations.
+		return nil
+	}
+
+	var content string
+	if provider == "github" {
+		ghHost := host
+		if ghHost == "" {
+			ghHost = "github.com"
+		}
+		content = fmt.Sprintf(`# Pinard credentials — GitHub-backed vignoble
+# Generated by: aoc init
+# Fill in the CHANGE_ME fields, then:
+#   export PINARD_GITHUB_TOKEN=<your fine-grained PAT>
+#   echo 'export PINARD_GITHUB_TOKEN=...' >> ~/.config/pinard/env
+
+github:
+  host: %s
+  user: CHANGE_ME          # your GitHub bot/service account username
+  token_env: PINARD_GITHUB_TOKEN
+  ssh_key: ~/.ssh/pinard_id_ed25519
+  git_name: Pinard
+  git_email: pinard@%s
+
+nats:
+  url: nats://CHANGE_ME:4222
+  user: CHANGE_ME
+  password_env: PINARD_NATS_PASSWORD
+
+# engram:
+#   server: https://engram.example.com
+#   cloud_token_env: ENGRAM_CLOUD_TOKEN
+`, ghHost, ghHost)
+	} else {
+		if host == "" {
+			host = "gitlab.example.com"
+		}
+		content = fmt.Sprintf(`# Pinard credentials — GitLab-backed vignoble
+# Generated by: aoc init
+# Fill in the CHANGE_ME fields, then:
+#   export PINARD_GITLAB_TOKEN=<your GitLab PAT (api scope)>
+#   echo 'export PINARD_GITLAB_TOKEN=...' >> ~/.config/pinard/env
+
+gitlab:
+  host: %s
+  user: CHANGE_ME          # your GitLab bot/service account username
+  token_env: PINARD_GITLAB_TOKEN
+  ssh_key: ~/.ssh/pinard_id_ed25519
+  git_name: Pinard
+  git_email: pinard@%s
+
+nats:
+  url: nats://CHANGE_ME:4222
+  user: CHANGE_ME
+  password_env: PINARD_NATS_PASSWORD
+
+# engram:
+#   server: https://engram.example.com
+#   cloud_token_env: ENGRAM_CLOUD_TOKEN
+`, host, host)
+	}
+
+	dir := filepath.Dir(credsPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(credsPath, []byte(content), 0600); err != nil {
+		return err
+	}
+	os.Chmod(dir, 0700)
+	fmt.Println("  ~/.config/pinard/credentials.yaml (template — fill in CHANGE_ME fields)")
+	return nil
 }
 
 func init() {

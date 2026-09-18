@@ -189,6 +189,18 @@ while the agent is still listed as live in KV, the mirror is respawned.
 This means remote agents appear alongside local agents in the conductor control room
 without any manual setup.
 
+### Remote worker liveness in the conductor
+
+The conductor’s worker list (`list_workers`, the dashboard, `aoc status`) tracks
+remote/standalone workers **by KV heartbeat**, not by local tmux presence. A remote
+worker’s KV entry is only considered stale when its `lastSeen` heartbeat is more than
+5 minutes old — matching the webterm gateway’s own threshold. The conductor never
+deletes a remote worker’s entry simply because the session is absent from the local
+tmux socket (that was the root cause of "remote worker not appearing in the dashboard"
+errors; this behaviour was corrected).
+
+Local workers continue to use the local-tmux liveness check as before.
+
 ## Watching a remote worker
 
 For daemon-less or Singularity workers that have **no tmux** available, the launcher

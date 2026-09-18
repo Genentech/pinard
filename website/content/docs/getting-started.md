@@ -39,6 +39,26 @@ This guide takes you from nothing to a running vignoble with a conductor.
 
 Pinard ships two ways.
 
+### Container images (k8s services)
+
+Pre-built images are published to **GitHub Container Registry** on every release —
+no credentials needed to pull:
+
+| Image | Contents |
+|-------|----------|
+| `ghcr.io/genentech/pinard` | webterm gateway + memory services + static docs site |
+| `ghcr.io/genentech/pinard-webterm-gateway` | standalone webterm gateway only |
+
+```bash
+docker pull ghcr.io/genentech/pinard:latest
+docker pull ghcr.io/genentech/pinard-webterm-gateway:latest
+```
+
+These images are for the **k8s-hosted backend services**. The `aoc` CLI and daemon run
+on your control host — install them from a release bundle or source (below). The
+[engram](https://github.com/Gentleman-Programming/engram) memory backend is a
+third-party binary; install it separately from the upstream release page.
+
 ### From a release bundle (recommended)
 
 A release is a single self-extracting `.run` archive (Linux/glibc x64). It bundles the
@@ -72,68 +92,98 @@ cloud engram in lockstep; a version drift can cause cloud sync to fail due to
 mutation/chunk format mismatches. Re-running `./install` after a cluster upgrade will
 update your local engram CLI automatically.
 
+## Create a vignoble (interactive wizard)
+
+The fastest path on a fresh machine is the interactive wizard. Run `aoc init` (or
+`pinard init`) from any directory with no arguments and answer a few prompts:
+
+```
+$ aoc init
+
+Welcome to Pinard! Let's create your first vignoble.
+
+Vignoble name [myproject]:
+Location
+  * 1) ~/vignoble-myproject
+    2) Use the current directory (/home/me/code)
+Choice [1]:
+Backend
+  * 1) Connect to a Git host (GitHub / GitLab)
+    2) Solo / local (no Git host — laptop-only)
+Choice [1]:
+Git provider
+  * 1) GitHub (github.com or GHES)
+    2) GitLab (self-hosted or gitlab.com)
+Choice [1]:
+Git host [github.com]:
+GitHub org (optional):
+Add a first repository now? [y/N]: y
+  Repository short name (e.g. my-app): my-api
+  Repository path (e.g. owner/my-app): myorg/my-api
+  Enable auto-merge? [y/N]:
+```
+
+The wizard:
+- Scaffolds `~/vignoble-<name>` (or the current directory) with all the required files.
+- Generates a `~/.config/pinard/credentials.yaml` **template** if one does not exist —
+  fill in the `CHANGE_ME` fields before starting the daemon.
+- Starts the daemon automatically.
+
+Just press **Enter** to accept every default and you get a GitHub-backed vignoble at
+`~/vignoble-<name>`. Run `pinard` from the vignoble directory to open the conductor.
+
+> **Already have credentials?** If `~/.config/pinard/credentials.yaml` already exists
+> the wizard leaves it untouched.
+
+### Non-interactive (CI / scripts)
+
+Passing all required flags bypasses the wizard entirely — safe for automation:
+
+```bash
+# GitLab
+aoc init myproject --gitlab-host gitlab.example.com --gitlab-group mygroup
+
+# GitHub (via pressoir block in vignes.yaml)
+aoc init myproject --gitlab-host "" --path ~/vignoble-myproject
+
+# Solo / local
+aoc init myproject --local
+```
+
 ## Credentials
 
-Pinard authenticates to GitLab (as a dedicated service account) and to NATS. All fields
-must be set explicitly — there are no built-in defaults. Copy the bundled template:
+The wizard writes a template to `~/.config/pinard/credentials.yaml` when none exists.
+Fill in the `CHANGE_ME` fields and export the referenced env vars:
 
 ```bash
-cp credentials.example.yaml ~/.config/pinard/credentials.yaml
-# then fill in your values
+# GitHub-backed (template filled in by the wizard)
+export PINARD_GITHUB_TOKEN="ghp_xxxxx"
+export PINARD_NATS_PASSWORD="xxxxx"
+echo 'export PINARD_GITHUB_TOKEN=...' >> ~/.config/pinard/env
+echo 'export PINARD_NATS_PASSWORD=...' >> ~/.config/pinard/env
 ```
-
-Minimal `~/.config/pinard/credentials.yaml`:
-
-```yaml
-gitlab:
-  host: gitlab.example.com           # GitLab API hostname (no scheme)
-  user: your-bot-user                # GitLab username of the service account
-  token_env: PINARD_GITLAB_TOKEN     # env var holding the PAT
-  ssh_key: ~/.ssh/pinard_id_ed25519
-  git_name: Pinard
-  git_email: bot@example.com
-
-nats:
-  url: wss://nats.example.com        # NATS JetStream WebSocket URL (required)
-  user: your-nats-user
-  password_env: PINARD_NATS_PASSWORD
-```
-
-Then export the secrets in your shell (or put them in `~/.config/pinard/env`, which the
-daemon reads on start):
 
 ```bash
+# GitLab-backed
 export PINARD_GITLAB_TOKEN="glpat-xxxxx"
 export PINARD_NATS_PASSWORD="xxxxx"
+echo 'export PINARD_GITLAB_TOKEN=...' >> ~/.config/pinard/env
 ```
 
-See [Configuration](/docs/configuration/) for the full schema including optional blocks
-(`engram:`, `webterm:`, and the [Buddy Capsule](/docs/capsules/) `PINARD_MNEMOSYNE_URL`).
-
-## Create a vignoble
-
-`aoc init` scaffolds a complete vignoble directory and starts the daemon:
-
-```bash
-aoc init myproject --gitlab-host gitlab.com --gitlab-group mygroup
-cd ~/vignoble-myproject
-```
-
-This creates `vignes.yaml`, `schedules.yaml`, `PINARD.md`, the `.state/`, `logs/`,
-`changes/`, and `parcelles/` directories, and the conductor permission files. It has no
-systemd dependency — the daemon self-supervises.
+Secrets placed in `~/.config/pinard/env` are sourced automatically by the launcher and
+daemon. See [Configuration](/docs/configuration/) for the full schema.
 
 ## Register a vigne
 
-Add each repository you want to orchestrate:
+The wizard can add a first repo during creation. To add more later:
 
 ```bash
-aoc add vigne my-api --path ~/my-api --repo mygroup/my-api
+aoc add vigne my-api --path ~/my-api --repo myorg/my-api
 ```
 
 This appends an entry to `vignes.yaml`. Repeat for every repo. (Add `--auto-merge` only if
 you want that vigne's MRs merged automatically — it's off by default; see
-[Configuration](/docs/configuration/).)
+[Configuration](/docs/configuration/))
 
 ## Run the daemon
 
